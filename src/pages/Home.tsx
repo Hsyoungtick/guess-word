@@ -80,7 +80,10 @@ export default function Home() {
     if (result) saveCredential(result as Credential)
   }
   async function join(event: FormEvent) {
-    event.preventDefault(); const result = await run(() => joinRoom({ nickname, roomCode }))
+    event.preventDefault()
+    if (!nickname.trim()) { setActionError('请先输入你的昵称'); return }
+    if (roomCode.length !== 6) { setActionError('请输入有效的邀请链接或 6 位房间码'); return }
+    const result = await run(() => joinRoom({ nickname, roomCode }))
     if (result) saveCredential(result as Credential)
   }
   async function copyInvite() {
@@ -114,7 +117,7 @@ export default function Home() {
         <form onSubmit={create}><fieldset><legend>创建房间 · 选择词库频道</legend><div className="choice-row">{categories.map((item) => <button type="button" className={category === item ? 'selected' : ''} onClick={() => setCategory(item)} key={item}>{item}</button>)}</div></fieldset>
           <fieldset><legend>信号干扰强度</legend><div className="difficulty-row">{difficulties.map((item, index) => <button type="button" className={difficulty === item ? 'selected' : ''} onClick={() => setDifficulty(item)} key={item}><span>{item}</span><i>{'●'.repeat(index + 1)}</i></button>)}</div></fieldset>
           <button disabled={busy || !nickname.trim()} className="start-button" type="submit"><span>创建私人频道</span><ArrowRight size={23} /></button></form>
-        <div className="join-divider"><span>或使用邀请频道</span></div><form className="join-form" onSubmit={join}><input aria-label="房间码或邀请链接" value={roomCode} onChange={(e) => setRoomCode(parseRoomCode(e.target.value))} onPaste={(e) => { const code = parseRoomCode(e.clipboardData.getData('text')); if (code) { e.preventDefault(); setRoomCode(code) } }} placeholder="粘贴邀请链接或 6 位房间码" /><button type="submit" disabled={busy || !nickname.trim() || roomCode.length !== 6}>加入</button></form>
+        <div className="join-divider"><span>或使用邀请频道</span></div><form className="join-form" onSubmit={join}><input aria-label="房间码或邀请链接" value={roomCode} onChange={(e) => setRoomCode(parseRoomCode(e.target.value))} onPaste={(e) => { const code = parseRoomCode(e.clipboardData.getData('text')); if (code) { e.preventDefault(); setRoomCode(code) } }} placeholder="粘贴邀请链接或 6 位房间码" /><button type="submit" disabled={busy}>{busy ? '加入中…' : '加入'}</button></form>
         {(actionError || syncError) && <p className="error-message">{actionError || syncError}</p>}<p className="privacy-note">玩家凭证仅保存在本机，目标答案与 AI 密钥只留在服务端</p></div><div className="dial-art" aria-hidden="true"><span>0</span><span>50</span><span>100</span><div className="needle" /></div></section>
     : !snapshot ? <section className="loading-stage"><Radio className="loading-radio" size={44} /><h1>正在连接频道</h1><p>{syncError || '同步服务端权威状态…'}</p><button className="quit-button" onClick={leave}>返回大厅</button></section>
     : snapshot.room.status === 'waiting' ? <section className="waiting-stage"><div className="channel-card"><p className="eyebrow">PRIVATE CHANNEL</p><h1>{snapshot.room.code}</h1><p>{snapshot.room.category}频道 · {snapshot.room.difficulty}干扰</p><button type="button" onClick={() => void copyInvite()}><Copy size={17} />{copyStatus === '邀请链接已复制' ? '已复制' : '复制邀请链接'}</button>{copyStatus && <p className="copy-status" role="status">{copyStatus}</p>}</div>
