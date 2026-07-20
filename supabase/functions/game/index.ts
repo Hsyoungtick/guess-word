@@ -167,7 +167,7 @@ function parseScore(output: JsonObject): AiScore {
   return { similarity: output.similarity, closerThan: output.closerThan.filter((item): item is string => typeof item === 'string'), fartherThan: output.fartherThan.filter((item): item is string => typeof item === 'string') }
 }
 
-const SCORE_RULES = '你是中文语义猜词评分器。历史分数是完整且不可修改的锚点。评估新猜词与答案的语义关联度，并判断它相对每个历史词更接近还是更远。只返回 JSON：similarity(0-99整数)、closerThan(新词比这些历史词更接近答案的原词数组)、fartherThan(新词比这些历史词更远的原词数组)。不得返回答案或改写历史分数。'
+const SCORE_RULES = '你是中文语义猜词评分器。历史分数是完整且不可修改的锚点。先把历史词与新猜词按“与答案的语义接近程度”排成严格顺序，再给新猜词一个能体现该排序位置的 0-99 整数 similarity。只返回 JSON：similarity、closerThan、fartherThan。closerThan 必须列出所有明显比新词更远的历史原词；fartherThan 必须列出所有明显比新词更近的历史原词。similarity 必须与 closerThan/fartherThan 的排序一致：比某历史词更近就必须高于它，比某历史词更远就必须低于它。尽量使用细粒度分数区分不同词，不要偏好 0、5、10、20、50、70、80、90 等整十或整五数；除非语义确实几乎相同，不要给不同词相同分数。不得返回答案，不得改写历史分数。'
 
 async function scoreGuess(answer: string, history: HistoryAnchor[], newGuess: string): Promise<AiScore> {
   const context = { answer, history, newGuess }
