@@ -1,4 +1,4 @@
-import type { Credential, GameSnapshot } from './types'
+import type { Credential, GameSnapshot, LobbyRoom } from './types'
 
 type ApiResponse<T> = { ok: true; data: T } | { ok: false; error: { message: string } }
 const functionBase = (import.meta.env.VITE_SUPABASE_FUNCTION_URL || '').replace(/\/+$/, '')
@@ -23,11 +23,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return result.data
 }
 
-export async function createRoom(input: { nickname: string; category: string; difficulty: string }) {
+export const listRooms = () => request<LobbyRoom[]>('/rooms')
+
+export async function createRoom(input: { nickname?: string; category: string; difficulty: string }) {
   return request<Credential & { playerId: string }>('/rooms', { method: 'POST', body: JSON.stringify(input) })
 }
 
-export async function joinRoom(input: { nickname: string; roomCode: string }) {
+export async function joinRoom(input: { nickname?: string; roomCode: string }) {
   return request<Credential & { playerId: string }>('/rooms/join', { method: 'POST', body: JSON.stringify(input) })
 }
 
@@ -35,8 +37,8 @@ export async function getSnapshot(credential: Credential) {
   return request<GameSnapshot>(`/rooms/${credential.roomCode}`, { headers: { authorization: `Bearer ${credential.playerToken}` } })
 }
 
-function command(path: string, credential: Credential, extra: Record<string, unknown> = {}) {
-  return request<GameSnapshot>(`/rooms/${credential.roomCode}/${path}`, {
+function command<T = GameSnapshot>(path: string, credential: Credential, extra: Record<string, unknown> = {}) {
+  return request<T>(`/rooms/${credential.roomCode}/${path}`, {
     method: 'POST', body: JSON.stringify({ playerToken: credential.playerToken, ...extra }),
   })
 }
@@ -47,3 +49,4 @@ export const submitGuess = (credential: Credential, guess: string, expectedVersi
 export const processTimeout = (credential: Credential, expectedVersion: number) => command('timeout', credential, { expectedVersion })
 export const heartbeat = (credential: Credential) => command('heartbeat', credential)
 export const requestRematch = (credential: Credential) => command('rematch', credential)
+export const leaveRoom = (credential: Credential) => command<{ left: boolean }>('leave', credential)

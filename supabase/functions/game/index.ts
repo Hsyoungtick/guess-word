@@ -2,9 +2,9 @@ import { createClient } from 'npm:@supabase/supabase-js@2'
 import { constrainAiScore, normalizeWord, type AiScore, type HistoryAnchor } from './game-logic.ts'
 
 type JsonObject = Record<string, unknown>
-type Seat = 'A' | 'B'
-type DbRoom = { id: string; code: string; status: 'waiting' | 'playing' | 'finished'; category: string; difficulty: string; answer_ciphertext: string | null; answer_word_id: string | null; current_player_id: string | null; turn_deadline: string | null; turn_number: number; version: number; winner_id: string | null }
-type DbPlayer = { id: string; room_id: string; seat: Seat; nickname: string; token_hash: string; last_seen_at: string; rematch_ready: boolean }
+type Seat = number
+type DbRoom = { id: string; code: string; status: 'waiting' | 'playing' | 'finished'; category: string; difficulty: string; answer_ciphertext: string | null; answer_word_id: string | null; current_player_id: string | null; turn_deadline: string | null; turn_number: number; version: number; winner_id: string | null; max_players: number; visibility: 'public' | 'private'; host_player_id: string | null; paused_at: string | null; pause_reason: string | null }
+type DbPlayer = { id: string; room_id: string; seat: string; seat_number: number; nickname: string; token_hash: string; last_seen_at: string; rematch_ready: boolean; is_active: boolean }
 type DbGuess = { id: string; player_id: string; display_word: string; normalized_word: string; similarity: number; turn_number: number; created_at: string }
 type AiConfig = { baseUrl: string; apiKey: string; model: string; temperature: number; timeoutMs: number }
 
@@ -58,20 +58,21 @@ function text(value: unknown, field: string, max: number): string {
 }
 
 function playerName(value: unknown): string {
-  const result = text(value, '昵称', 20)
-  if (!/^[\p{L}\p{N} _·.'’-]+$/u.test(result)) throw new ApiError(400, 'INVALID_NICKNAME', '昵称包含不支持的字符')
+  const result = typeof value === 'string' ? value.trim() : ''
+  if (!result) return 'xxx'
+  if ([...result].length > 20 || /[\p{Cc}\p{Cf}]/u.test(result) || !/^[\p{L}\p{N} _·.'’-]+$/u.test(result)) throw new ApiError(400, 'INVALID_NICKNAME', '昵称包含不支持的字符')
   return result
 }
 
 function guessWord(value: unknown): string {
-  const result = text(value, '猜词', 1000)
-  if (!/^[\p{L}\p{N} _·.'’-]+$/u.test(result)) throw new ApiError(400, 'INVALID_GUESS', '猜词包含不支持的字符')
+  const result = text(value, '猜词', 8)
+  if ([...result].length < 1 || !/^[\p{L}\p{N}\u4e00-\u9fff]+$/u.test(result)) throw new ApiError(400, 'INVALID_GUESS', '猜词必须是 1 至 8 个字')
   return result
 }
 
 function roomCode(value: unknown): string {
-  const result = text(value, '房间码', 6).toUpperCase()
-  if (!/^[A-Z0-9]{6}$/.test(result)) throw new ApiError(400, 'INVALID_CODE', '请输入 6 位房间码')
+  const result = text(value, '房间码', 6)
+  if (!/^\d{6}$/.test(result)) throw new ApiError(400, 'INVALID_CODE', '请输入 6 位数字房间码')
   return result
 }
 
@@ -187,19 +188,21 @@ async function authenticate(code: string, token: string): Promise<{ room: DbRoom
   if (token.length < 40 || token.length > 100) throw new ApiError(401, 'UNAUTHORIZED', '玩家凭证无效')
   const room = await roomByCode(code)
   const { data } = await client.from('players').select('*').eq('room_id', room.id).eq('token_hash', await tokenHash(token)).maybeSingle()
-  if (!data) throw new ApiError(401, 'UNAUTHORIZED', '玩家凭证无效')
+  if (!data || !(data as DbPlayer).is_active) throw new ApiError(401, 'UNAUTHORIZED', '玩家凭证无效')
   return { room, player: data as DbPlayer }
 }
 
 async function snapshot(code: string, token: string) {
-  const { room, player } = await authenticate(code, token)
+  const { player } = await authenticate(code, token)
+  await client.rpc('sync_room_state', { p_code: code })
+  const room = await roomByCode(code)
   const [{ data: playerRows }, { data: guessRows }] = await Promise.all([
-    client.from('players').select('id,room_id,seat,nickname,last_seen_at,rematch_ready').eq('room_id', room.id).order('seat'),
+    client.from('players').select('id,room_id,seat,seat_number,nickname,last_seen_at,rematch_ready,is_active').eq('room_id', room.id).order('seat_number'),
     client.from('guesses').select('id,player_id,display_word,similarity,turn_number,created_at').eq('room_id', room.id).order('created_at'),
   ])
   const now = new Date()
   const answer = room.status === 'finished' && room.answer_ciphertext ? await decryptAnswer(room.answer_ciphertext) : null
-  return { room: { code: room.code, status: room.status, category: room.category, difficulty: room.difficulty, version: Number(room.version), currentPlayerId: room.current_player_id, turnDeadline: room.turn_deadline, turnNumber: Number(room.turn_number), winnerId: room.winner_id, answer }, players: ((playerRows ?? []) as DbPlayer[]).map((item) => ({ id: item.id, seat: item.seat, nickname: item.nickname, lastSeenAt: item.last_seen_at, online: now.getTime() - new Date(item.last_seen_at).getTime() <= 45000, rematchReady: item.rematch_ready })), guesses: ((guessRows ?? []) as DbGuess[]).map((item) => ({ id: item.id, playerId: item.player_id, displayWord: item.display_word, similarity: item.similarity, turnNumber: Number(item.turn_number), createdAt: item.created_at })), me: { id: player.id, seat: player.seat }, serverNow: now.toISOString() }
+  return { room: { code: room.code, status: room.paused_at ? 'paused' : room.status, category: room.category, difficulty: room.difficulty, version: Number(room.version), currentPlayerId: room.current_player_id, turnDeadline: room.turn_deadline, turnNumber: Number(room.turn_number), winnerId: room.winner_id, answer, hostPlayerId: room.host_player_id, maxPlayers: room.max_players, pauseReason: room.pause_reason }, players: ((playerRows ?? []) as DbPlayer[]).filter((item) => item.is_active).map((item) => ({ id: item.id, seat: Number(item.seat_number), nickname: item.nickname, isHost: item.id === room.host_player_id, isActive: item.is_active, lastSeenAt: item.last_seen_at, online: now.getTime() - new Date(item.last_seen_at).getTime() <= 45000, rematchReady: item.rematch_ready })), guesses: ((guessRows ?? []) as DbGuess[]).map((item) => ({ id: item.id, playerId: item.player_id, displayWord: item.display_word, similarity: item.similarity, turnNumber: Number(item.turn_number), createdAt: item.created_at })), me: { id: player.id, seat: Number((playerRows as DbPlayer[] | null)?.find((item) => item.id === player.id)?.seat_number || 0), isHost: player.id === room.host_player_id }, serverNow: now.toISOString() }
 }
 
 async function createRoom(input: JsonObject) {
@@ -207,14 +210,15 @@ async function createRoom(input: JsonObject) {
   const category = selection(input.category, '词库', ['随机', '生活', '自然', '文化', '科技'])
   const difficulty = selection(input.difficulty, '难度', ['简单', '普通', '困难', '极难'])
   const playerToken = createToken()
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    const random = crypto.getRandomValues(new Uint8Array(6))
-    const code = Array.from(random, (byte) => alphabet[byte & 31]).join('')
-    const { data: room, error } = await client.from('rooms').insert({ code, category, difficulty }).select('id').single()
+    const random = crypto.getRandomValues(new Uint32Array(1))[0] % 1000000
+    const code = String(random).padStart(6, '0')
+    const { data: room, error } = await client.from('rooms').insert({ code, category, difficulty, max_players: 8, visibility: 'public' }).select('id').single()
     if (error) continue
-    const { data: player, error: playerError } = await client.from('players').insert({ room_id: room.id, seat: 'A', nickname, token_hash: await tokenHash(playerToken) }).select('id').single()
+    const { data: player, error: playerError } = await client.from('players').insert({ room_id: room.id, seat: 'A', seat_number: 1, nickname, token_hash: await tokenHash(playerToken) }).select('id').single()
     if (playerError) throw new ApiError(500, 'CREATE_FAILED', '创建玩家失败')
+    const { error: hostError } = await client.from('rooms').update({ host_player_id: player.id }).eq('id', room.id)
+    if (hostError) throw new ApiError(500, 'CREATE_FAILED', '创建房主失败')
     const { error: eventError } = await client.rpc('touch_room_event', { p_code: code, p_version: 1 })
     if (eventError) throw new ApiError(500, 'CREATE_FAILED', '创建房间事件失败')
     return { roomCode: code, playerToken, playerId: player.id }
@@ -238,7 +242,7 @@ async function joinRoom(input: JsonObject) {
 async function start(input: JsonObject, code: string) {
   const token = text(input.playerToken, '玩家令牌', 100)
   const { room, player } = await authenticate(code, token)
-  if (player.seat !== 'A') throw new ApiError(403, 'HOST_ONLY', '仅房主可以开始')
+  if (player.id !== room.host_player_id) throw new ApiError(403, 'HOST_ONLY', '仅房主可以开始')
   if (room.status !== 'waiting') return snapshot(code, token)
   const selected = await claimWord(room.category, room.difficulty)
   const { error } = await client.rpc('start_game', { p_code: code, p_token_hash: await tokenHash(token), p_answer_ciphertext: await encryptAnswer(selected.word), p_answer_word_id: selected.id })
@@ -251,7 +255,9 @@ async function guess(input: JsonObject, code: string) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId)) throw new ApiError(400, 'INVALID_REQUEST_ID', 'requestId 必须是 UUID')
   if (!Number.isSafeInteger(input.expectedVersion) || Number(input.expectedVersion) < 1) throw new ApiError(400, 'INVALID_VERSION', '缺少权威版本')
   const expectedVersion = Number(input.expectedVersion)
-  const { room, player } = await authenticate(code, token)
+  const { player } = await authenticate(code, token)
+  await client.rpc('sync_room_state', { p_code: code })
+  const room = await roomByCode(code)
   const { data: prior } = await client.from('guesses').select('id').eq('room_id', room.id).eq('request_id', requestId).maybeSingle()
   if (prior) return snapshot(code, token)
   const normalized = normalizeWord(displayWord)
@@ -270,7 +276,7 @@ async function guess(input: JsonObject, code: string) {
     const history = ((rows ?? []) as Array<{ display_word: string; similarity: number }>).map((item) => ({ word: item.display_word, similarity: item.similarity }))
     similarity = (await scoreGuess(answer, history, displayWord)).similarity
   }
-  const { error } = await client.rpc('commit_guess', { p_code: code, p_token_hash: await tokenHash(token), p_request_id: requestId, p_expected_version: expectedVersion, p_normalized_word: normalized, p_display_word: displayWord, p_similarity: similarity, p_hint: '' })
+  const { error } = await client.rpc('commit_guess', { p_code: code, p_token_hash: await tokenHash(token), p_request_id: requestId, p_expected_version: expectedVersion, p_normalized_word: normalized, p_display_word: displayWord, p_similarity: similarity })
   if (error) throw new ApiError(409, 'GUESS_CONFLICT', '提交状态冲突')
   return snapshot(code, token)
 }
@@ -284,10 +290,10 @@ async function timeout(input: JsonObject, code: string) {
 }
 
 async function heartbeat(input: JsonObject, code: string) {
-  const token = text(input.playerToken, '玩家令牌', 100); const { room, player } = await authenticate(code, token); const now = new Date().toISOString()
-  await client.from('players').update({ last_seen_at: now }).eq('id', player.id)
-  await client.rpc('touch_room_event', { p_code: code, p_version: room.version })
-  return { lastSeenAt: now }
+  const token = text(input.playerToken, '玩家令牌', 100)
+  const { error } = await client.rpc('heartbeat_room', { p_code: code, p_token_hash: await tokenHash(token) })
+  if (error) throw new ApiError(409, 'HEARTBEAT_CONFLICT', '保活状态冲突')
+  return snapshot(code, token)
 }
 
 async function rematch(input: JsonObject, code: string) {
@@ -297,11 +303,25 @@ async function rematch(input: JsonObject, code: string) {
   return snapshot(code, token)
 }
 
+async function leave(input: JsonObject, code: string) {
+  const token = text(input.playerToken, '玩家令牌', 100)
+  const { error } = await client.rpc('leave_room', { p_code: code, p_token_hash: await tokenHash(token) })
+  if (error) throw new ApiError(409, 'LEAVE_CONFLICT', '离开房间状态冲突')
+  return { left: true }
+}
+
+async function lobby() {
+  const { data, error } = await client.rpc('list_public_rooms')
+  if (error) throw new ApiError(503, 'LOBBY_UNAVAILABLE', '房间大厅暂时不可用')
+  return (data || []).map((room: JsonObject) => ({ code: room.code, category: room.category, difficulty: room.difficulty, status: room.status, maxPlayers: room.max_players, playerCount: room.player_count, updatedAt: room.updated_at }))
+}
+
 async function route(request: Request): Promise<unknown> {
   const url = new URL(request.url)
   const marker = '/game/'
   const path = url.pathname.includes(marker) ? url.pathname.slice(url.pathname.indexOf(marker) + marker.length) : url.pathname.endsWith('/game') ? '' : url.pathname.replace(/^\/+/, '')
   const segments = path.split('/').filter(Boolean).map(decodeURIComponent)
+  if (request.method === 'GET' && segments.length === 1 && segments[0] === 'rooms') return lobby()
   if (request.method === 'POST' && segments.length === 1 && segments[0] === 'rooms') return createRoom(await requestBody(request))
   if (request.method === 'POST' && segments.join('/') === 'rooms/join') return joinRoom(await requestBody(request))
   if (segments[0] !== 'rooms' || !segments[1]) throw new ApiError(404, 'NOT_FOUND', '接口不存在')
@@ -318,6 +338,7 @@ async function route(request: Request): Promise<unknown> {
   if (action === 'timeout') return timeout(input, code)
   if (action === 'heartbeat') return heartbeat(input, code)
   if (action === 'rematch') return rematch(input, code)
+  if (action === 'leave') return leave(input, code)
   throw new ApiError(404, 'NOT_FOUND', '接口不存在')
 }
 

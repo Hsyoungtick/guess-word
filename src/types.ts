@@ -1,10 +1,12 @@
-export type Seat = 'A' | 'B'
-export type RoomStatus = 'waiting' | 'playing' | 'finished'
+export type Seat = number
+export type RoomStatus = 'waiting' | 'playing' | 'paused' | 'finished'
 
 export type PublicPlayer = {
   id: string
   seat: Seat
   nickname: string
+  isHost: boolean
+  isActive: boolean
   lastSeenAt: string
   online: boolean
   rematchReady: boolean
@@ -19,6 +21,16 @@ export type PublicGuess = {
   createdAt: string
 }
 
+export type LobbyRoom = {
+  code: string
+  category: string
+  difficulty: string
+  status: RoomStatus
+  maxPlayers: number
+  playerCount: number
+  updatedAt: string
+}
+
 export type GameSnapshot = {
   room: {
     code: string
@@ -31,10 +43,13 @@ export type GameSnapshot = {
     turnNumber: number
     winnerId: string | null
     answer: string | null
+    hostPlayerId: string | null
+    maxPlayers: number
+    pauseReason: string | null
   }
   players: PublicPlayer[]
   guesses: PublicGuess[]
-  me: { id: string; seat: Seat }
+  me: { id: string; seat: Seat; isHost: boolean }
   serverNow: string
 }
 
