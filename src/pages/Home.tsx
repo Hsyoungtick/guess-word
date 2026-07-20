@@ -12,6 +12,17 @@ function loadCredential(): Credential | null {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null') as Credential | null } catch { return null }
 }
 
+function parseRoomCode(value: string) {
+  const input = value.trim()
+  try {
+    const url = new URL(input)
+    return (url.searchParams.get('room') || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6)
+  } catch {
+    const queryCode = input.match(/[?&]room=([A-Z0-9]{6})/i)?.[1]
+    return (queryCode || input).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6)
+  }
+}
+
 function Presence({ player, network, isMe }: { player?: PublicPlayer; network: NetworkState; isMe: boolean }) {
   const unstable = isMe && network !== 'online'
   const state = !player ? 'empty' : unstable ? 'unstable' : player.online ? 'online' : 'offline'
@@ -40,6 +51,7 @@ export default function Home() {
   const [guess, setGuess] = useState('')
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState('')
+  const [copyStatus, setCopyStatus] = useState('')
   const [seconds, setSeconds] = useState(30)
 
   const players = snapshot?.players || []
@@ -71,6 +83,23 @@ export default function Home() {
     event.preventDefault(); const result = await run(() => joinRoom({ nickname, roomCode }))
     if (result) saveCredential(result as Credential)
   }
+  async function copyInvite() {
+    setCopyStatus('')
+    try {
+      await navigator.clipboard.writeText(inviteUrl)
+      setCopyStatus('邀请链接已复制')
+    } catch {
+      const input = document.createElement('textarea')
+      input.value = inviteUrl
+      input.style.position = 'fixed'
+      input.style.opacity = '0'
+      document.body.appendChild(input)
+      input.select()
+      const copied = document.execCommand('copy')
+      input.remove()
+      setCopyStatus(copied ? '邀请链接已复制' : `请手动复制：${inviteUrl}`)
+    }
+  }
   async function command(action: () => Promise<typeof snapshot>) { const value = await run(action); if (value) setSnapshot(value) }
   async function sendGuess(event: FormEvent) {
     event.preventDefault(); if (!credential || !snapshot || !guess.trim()) return
@@ -85,10 +114,10 @@ export default function Home() {
         <form onSubmit={create}><fieldset><legend>创建房间 · 选择词库频道</legend><div className="choice-row">{categories.map((item) => <button type="button" className={category === item ? 'selected' : ''} onClick={() => setCategory(item)} key={item}>{item}</button>)}</div></fieldset>
           <fieldset><legend>信号干扰强度</legend><div className="difficulty-row">{difficulties.map((item, index) => <button type="button" className={difficulty === item ? 'selected' : ''} onClick={() => setDifficulty(item)} key={item}><span>{item}</span><i>{'●'.repeat(index + 1)}</i></button>)}</div></fieldset>
           <button disabled={busy || !nickname.trim()} className="start-button" type="submit"><span>创建私人频道</span><ArrowRight size={23} /></button></form>
-        <div className="join-divider"><span>或使用邀请频道</span></div><form className="join-form" onSubmit={join}><input aria-label="六位房间码" maxLength={6} value={roomCode} onChange={(e) => setRoomCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))} placeholder="6 位房间码" /><button disabled={busy || !nickname.trim() || roomCode.length !== 6}>加入</button></form>
+        <div className="join-divider"><span>或使用邀请频道</span></div><form className="join-form" onSubmit={join}><input aria-label="房间码或邀请链接" value={roomCode} onChange={(e) => setRoomCode(parseRoomCode(e.target.value))} onPaste={(e) => { const code = parseRoomCode(e.clipboardData.getData('text')); if (code) { e.preventDefault(); setRoomCode(code) } }} placeholder="粘贴邀请链接或 6 位房间码" /><button type="submit" disabled={busy || !nickname.trim() || roomCode.length !== 6}>加入</button></form>
         {(actionError || syncError) && <p className="error-message">{actionError || syncError}</p>}<p className="privacy-note">玩家凭证仅保存在本机，目标答案与 AI 密钥只留在服务端</p></div><div className="dial-art" aria-hidden="true"><span>0</span><span>50</span><span>100</span><div className="needle" /></div></section>
     : !snapshot ? <section className="loading-stage"><Radio className="loading-radio" size={44} /><h1>正在连接频道</h1><p>{syncError || '同步服务端权威状态…'}</p><button className="quit-button" onClick={leave}>返回大厅</button></section>
-    : snapshot.room.status === 'waiting' ? <section className="waiting-stage"><div className="channel-card"><p className="eyebrow">PRIVATE CHANNEL</p><h1>{snapshot.room.code}</h1><p>{snapshot.room.category}频道 · {snapshot.room.difficulty}干扰</p><button onClick={() => void navigator.clipboard.writeText(inviteUrl)}><Copy size={17} />复制邀请链接</button></div>
+    : snapshot.room.status === 'waiting' ? <section className="waiting-stage"><div className="channel-card"><p className="eyebrow">PRIVATE CHANNEL</p><h1>{snapshot.room.code}</h1><p>{snapshot.room.category}频道 · {snapshot.room.difficulty}干扰</p><button type="button" onClick={() => void copyInvite()}><Copy size={17} />{copyStatus === '邀请链接已复制' ? '已复制' : '复制邀请链接'}</button>{copyStatus && <p className="copy-status" role="status">{copyStatus}</p>}</div>
       <div className="waiting-players"><PlayerPanel player={players.find((p) => p.seat === 'A')} seat="A" active={false} guesses={[]} me={me?.seat === 'A'} network={network} /><div className="versus">VS</div><PlayerPanel player={players.find((p) => p.seat === 'B')} seat="B" active={false} guesses={[]} me={me?.seat === 'B'} network={network} /></div>
       <p className="waiting-note">{players.length < 2 ? '等待另一位玩家接入频道…' : me?.seat === 'A' ? '信号已就绪，可以开始出题' : '等待房主开始对局'}</p>
       {me?.seat === 'A' && <button className="start-button waiting-start" disabled={busy || players.length < 2} onClick={() => credential && command(() => startGame(credential))}><span>{busy ? 'AI 正在出题…' : '房主开始对决'}</span><ArrowRight /></button>}{actionError && <p className="error-message">{actionError}</p>}<button className="quit-button" onClick={leave}>退出房间</button></section>
