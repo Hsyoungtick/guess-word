@@ -7,6 +7,7 @@ type DbRoom = { id: string; code: string; status: 'waiting' | 'playing' | 'finis
 type DbPlayer = { id: string; room_id: string; seat: string; seat_number: number; nickname: string; token_hash: string; last_seen_at: string; rematch_ready: boolean; is_active: boolean }
 type DbGuess = { id: string; player_id: string; display_word: string; normalized_word: string; similarity: number; turn_number: number; created_at: string }
 type AiConfig = { baseUrl: string; apiKey: string; model: string; temperature: number; timeoutMs: number }
+type RankedScore = { similarity: number; ranking: string[]; closerThan: string[]; fartherThan: string[] }
 
 class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message) }
@@ -162,18 +163,28 @@ async function claimWord(category: string, difficulty: string): Promise<{ id: st
   return { id: selected.word_id, word: selected.answer }
 }
 
-function parseScore(output: JsonObject): AiScore {
-  if (typeof output.similarity !== 'number' || !Number.isFinite(output.similarity) || !Array.isArray(output.closerThan) || !Array.isArray(output.fartherThan)) throw new ApiError(502, 'AI_INVALID_RESPONSE', 'AI 评分结构无效')
-  return { similarity: output.similarity, closerThan: output.closerThan.filter((item): item is string => typeof item === 'string'), fartherThan: output.fartherThan.filter((item): item is string => typeof item === 'string') }
+function parseScore(output: JsonObject, history: HistoryAnchor[], newGuess: string): AiScore {
+  if (typeof output.similarity !== 'number' || !Number.isFinite(output.similarity)) throw new ApiError(502, 'AI_INVALID_RESPONSE', 'AI 评分结构无效')
+  const ranking = Array.isArray(output.ranking) ? output.ranking.filter((item): item is string => typeof item === 'string') : []
+  const closerThan = Array.isArray(output.closerThan) ? output.closerThan.filter((item): item is string => typeof item === 'string') : []
+  const fartherThan = Array.isArray(output.fartherThan) ? output.fartherThan.filter((item): item is string => typeof item === 'string') : []
+  const words = new Map(history.map((item) => [normalizeWord(item.word), item.word]))
+  words.set(normalizeWord(newGuess), newGuess)
+  const validRanking = ranking.map((word) => words.get(normalizeWord(word))).filter((word): word is string => Boolean(word))
+  const newIndex = validRanking.findIndex((word) => normalizeWord(word) === normalizeWord(newGuess))
+  if (newIndex >= 0) {
+    return { similarity: output.similarity, closerThan: validRanking.slice(newIndex + 1), fartherThan: validRanking.slice(0, newIndex) }
+  }
+  return { similarity: output.similarity, closerThan, fartherThan }
 }
 
-const SCORE_RULES = '你是中文语义猜词评分器。历史分数是完整且不可修改的锚点。先把历史词与新猜词按“与答案的语义接近程度”排成严格顺序，再给新猜词一个能体现该排序位置的 0-99 整数 similarity。只返回 JSON：similarity、closerThan、fartherThan。closerThan 必须列出所有明显比新词更远的历史原词；fartherThan 必须列出所有明显比新词更近的历史原词。similarity 必须与 closerThan/fartherThan 的排序一致：比某历史词更近就必须高于它，比某历史词更远就必须低于它。尽量使用细粒度分数区分不同词，不要偏好 0、5、10、20、50、70、80、90 等整十或整五数；除非语义确实几乎相同，不要给不同词相同分数。不得返回答案，不得改写历史分数。'
+const SCORE_RULES = '你是中文语义猜词评分器。历史分数是完整且不可修改的锚点。请把“新猜词 + 所有历史词”按与答案的语义接近程度从远到近排成一个严格 ranking 数组，数组必须包含新猜词和每个历史词各一次。然后给新猜词一个 0-99 的整数 similarity。只返回 JSON：{similarity, ranking, closerThan, fartherThan}。ranking 是最重要的字段；它必须完整、无重复、只使用输入中的原词。closerThan/fartherThan 必须与 ranking 一致：新猜词之前的词属于更远，之后的词属于更近。similarity 必须与历史分数和该排序一致。尽量使用细粒度分数区分不同词，不要偏好 0、5、10、20、50、70、80、90 等整十或整五数；除非语义确实几乎相同，不要给不同词相同分数。不得返回答案，不得改写历史分数。'
 
 async function scoreGuess(answer: string, history: HistoryAnchor[], newGuess: string): Promise<AiScore> {
   const context = { answer, history, newGuess }
-  let score = constrainAiScore(history, parseScore(await chat(SCORE_RULES, context)))
+  let score = constrainAiScore(history, parseScore(await chat(SCORE_RULES, context), history, newGuess))
   if (!score.bounds.conflict) return score
-  score = constrainAiScore(history, parseScore(await chat(`${SCORE_RULES} 上次相对关系造成空区间；请纠正相对关系。`, { ...context, invalidResponse: score })))
+  score = constrainAiScore(history, parseScore(await chat(`${SCORE_RULES} 上次相对关系造成空区间；请纠正相对关系。`, { ...context, invalidResponse: score }), history, newGuess))
   if (score.bounds.conflict) throw new ApiError(502, 'AI_ANCHOR_CONFLICT', 'AI 相对锚点冲突')
   return score
 }
