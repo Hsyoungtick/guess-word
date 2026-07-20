@@ -3,9 +3,9 @@ import { constrainAiScore, normalizeWord, type AiScore, type HistoryAnchor } fro
 
 type JsonObject = Record<string, unknown>
 type Seat = 'A' | 'B'
-type DbRoom = { id: string; code: string; status: 'waiting' | 'playing' | 'finished'; category: string; difficulty: string; answer_ciphertext: string | null; current_player_id: string | null; turn_deadline: string | null; turn_number: number; version: number; winner_id: string | null }
-type DbPlayer = { id: string; room_id: string; seat: Seat; nickname: string; token_hash: string; last_seen_at: string }
-type DbGuess = { id: string; player_id: string; display_word: string; normalized_word: string; similarity: number; hint: string; turn_number: number; created_at: string }
+type DbRoom = { id: string; code: string; status: 'waiting' | 'playing' | 'finished'; category: string; difficulty: string; answer_ciphertext: string | null; answer_word_id: string | null; current_player_id: string | null; turn_deadline: string | null; turn_number: number; version: number; winner_id: string | null }
+type DbPlayer = { id: string; room_id: string; seat: Seat; nickname: string; token_hash: string; last_seen_at: string; rematch_ready: boolean }
+type DbGuess = { id: string; player_id: string; display_word: string; normalized_word: string; similarity: number; turn_number: number; created_at: string }
 type AiConfig = { baseUrl: string; apiKey: string; model: string; temperature: number; timeoutMs: number }
 
 class ApiError extends Error {
@@ -64,7 +64,7 @@ function playerName(value: unknown): string {
 }
 
 function guessWord(value: unknown): string {
-  const result = text(value, '猜词', 20)
+  const result = text(value, '猜词', 1000)
   if (!/^[\p{L}\p{N} _·.'’-]+$/u.test(result)) throw new ApiError(400, 'INVALID_GUESS', '猜词包含不支持的字符')
   return result
 }
@@ -154,20 +154,22 @@ async function chat(system: string, user: JsonObject): Promise<JsonObject> {
   try { return JSON.parse(content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')) as JsonObject } catch { throw new ApiError(502, 'AI_INVALID_RESPONSE', 'AI 未返回合法 JSON') }
 }
 
-async function generateAnswer(category: string, difficulty: string): Promise<string> {
-  const output = await chat('你是双人中文猜词游戏的出题器。只返回 JSON：{"answer":"一个可猜的中文名词"}。答案不得含专名、敏感内容或解释。', { category, difficulty })
-  return guessWord(output.answer)
+async function claimWord(category: string, difficulty: string): Promise<{ id: string; word: string }> {
+  const { data, error } = await client.rpc('claim_word', { p_category: category, p_difficulty: difficulty })
+  const selected = Array.isArray(data) ? data[0] : data
+  if (error || !selected?.word_id || typeof selected.answer !== 'string') throw new ApiError(503, 'WORD_BANK_EMPTY', '当前词库暂无可用词语')
+  return { id: selected.word_id, word: selected.answer }
 }
 
 function parseScore(output: JsonObject): AiScore {
-  if (typeof output.similarity !== 'number' || !Number.isFinite(output.similarity) || typeof output.hint !== 'string' || !Array.isArray(output.closerThan) || !Array.isArray(output.fartherThan)) throw new ApiError(502, 'AI_INVALID_RESPONSE', 'AI 评分结构无效')
-  return { similarity: output.similarity, hint: output.hint.replace(/[\p{Cc}\p{Cf}]/gu, '').slice(0, 80), closerThan: output.closerThan.filter((item): item is string => typeof item === 'string'), fartherThan: output.fartherThan.filter((item): item is string => typeof item === 'string') }
+  if (typeof output.similarity !== 'number' || !Number.isFinite(output.similarity) || !Array.isArray(output.closerThan) || !Array.isArray(output.fartherThan)) throw new ApiError(502, 'AI_INVALID_RESPONSE', 'AI 评分结构无效')
+  return { similarity: output.similarity, closerThan: output.closerThan.filter((item): item is string => typeof item === 'string'), fartherThan: output.fartherThan.filter((item): item is string => typeof item === 'string') }
 }
 
-const SCORE_RULES = '你是中文语义猜词评分器。历史分数是完整、不可变的锚点。判断新猜词相对每个历史词更接近或更远，返回 JSON：similarity(0-99整数)、hint(简短且不泄露答案)、closerThan(新词比这些历史词更接近答案的原词数组)、fartherThan(新词比这些历史词更远的原词数组)。不得改写历史，不得返回答案。'
+const SCORE_RULES = '你是中文语义猜词评分器。历史分数是完整且不可修改的锚点。评估新猜词与答案的语义关联度，并判断它相对每个历史词更接近还是更远。只返回 JSON：similarity(0-99整数)、closerThan(新词比这些历史词更接近答案的原词数组)、fartherThan(新词比这些历史词更远的原词数组)。不得返回答案或改写历史分数。'
 
 async function scoreGuess(answer: string, history: HistoryAnchor[], newGuess: string): Promise<AiScore> {
-  const context = { rules: SCORE_RULES, answer, history, newGuess }
+  const context = { answer, history, newGuess }
   let score = constrainAiScore(history, parseScore(await chat(SCORE_RULES, context)))
   if (!score.bounds.conflict) return score
   score = constrainAiScore(history, parseScore(await chat(`${SCORE_RULES} 上次相对关系造成空区间；请纠正相对关系。`, { ...context, invalidResponse: score })))
@@ -192,18 +194,18 @@ async function authenticate(code: string, token: string): Promise<{ room: DbRoom
 async function snapshot(code: string, token: string) {
   const { room, player } = await authenticate(code, token)
   const [{ data: playerRows }, { data: guessRows }] = await Promise.all([
-    client.from('players').select('id,room_id,seat,nickname,last_seen_at').eq('room_id', room.id).order('seat'),
-    client.from('guesses').select('id,player_id,display_word,similarity,hint,turn_number,created_at').eq('room_id', room.id).order('created_at'),
+    client.from('players').select('id,room_id,seat,nickname,last_seen_at,rematch_ready').eq('room_id', room.id).order('seat'),
+    client.from('guesses').select('id,player_id,display_word,similarity,turn_number,created_at').eq('room_id', room.id).order('created_at'),
   ])
   const now = new Date()
   const answer = room.status === 'finished' && room.answer_ciphertext ? await decryptAnswer(room.answer_ciphertext) : null
-  return { room: { code: room.code, status: room.status, category: room.category, difficulty: room.difficulty, version: Number(room.version), currentPlayerId: room.current_player_id, turnDeadline: room.turn_deadline, turnNumber: Number(room.turn_number), winnerId: room.winner_id, answer }, players: ((playerRows ?? []) as DbPlayer[]).map((item) => ({ id: item.id, seat: item.seat, nickname: item.nickname, lastSeenAt: item.last_seen_at, online: now.getTime() - new Date(item.last_seen_at).getTime() <= 45000 })), guesses: ((guessRows ?? []) as DbGuess[]).map((item) => ({ id: item.id, playerId: item.player_id, displayWord: item.display_word, similarity: item.similarity, hint: item.hint, turnNumber: Number(item.turn_number), createdAt: item.created_at })), me: { id: player.id, seat: player.seat }, serverNow: now.toISOString() }
+  return { room: { code: room.code, status: room.status, category: room.category, difficulty: room.difficulty, version: Number(room.version), currentPlayerId: room.current_player_id, turnDeadline: room.turn_deadline, turnNumber: Number(room.turn_number), winnerId: room.winner_id, answer }, players: ((playerRows ?? []) as DbPlayer[]).map((item) => ({ id: item.id, seat: item.seat, nickname: item.nickname, lastSeenAt: item.last_seen_at, online: now.getTime() - new Date(item.last_seen_at).getTime() <= 45000, rematchReady: item.rematch_ready })), guesses: ((guessRows ?? []) as DbGuess[]).map((item) => ({ id: item.id, playerId: item.player_id, displayWord: item.display_word, similarity: item.similarity, turnNumber: Number(item.turn_number), createdAt: item.created_at })), me: { id: player.id, seat: player.seat }, serverNow: now.toISOString() }
 }
 
 async function createRoom(input: JsonObject) {
   const nickname = playerName(input.nickname)
   const category = selection(input.category, '词库', ['随机', '生活', '自然', '文化', '科技'])
-  const difficulty = selection(input.difficulty, '难度', ['简单', '普通', '困难'])
+  const difficulty = selection(input.difficulty, '难度', ['简单', '普通', '困难', '极难'])
   const playerToken = createToken()
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
   for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -238,8 +240,8 @@ async function start(input: JsonObject, code: string) {
   const { room, player } = await authenticate(code, token)
   if (player.seat !== 'A') throw new ApiError(403, 'HOST_ONLY', '仅房主可以开始')
   if (room.status !== 'waiting') return snapshot(code, token)
-  const answer = await generateAnswer(room.category, room.difficulty)
-  const { error } = await client.rpc('start_game', { p_code: code, p_token_hash: await tokenHash(token), p_answer_ciphertext: await encryptAnswer(answer) })
+  const selected = await claimWord(room.category, room.difficulty)
+  const { error } = await client.rpc('start_game', { p_code: code, p_token_hash: await tokenHash(token), p_answer_ciphertext: await encryptAnswer(selected.word), p_answer_word_id: selected.id })
   if (error) throw new ApiError(409, 'START_CONFLICT', '开始状态冲突')
   return snapshot(code, token)
 }
@@ -259,16 +261,16 @@ async function guess(input: JsonObject, code: string) {
   if (!room.turn_deadline || new Date(room.turn_deadline).getTime() <= Date.now()) throw new ApiError(409, 'TURN_EXPIRED', '本回合已超时')
   if (!room.answer_ciphertext) throw new ApiError(500, 'ANSWER_MISSING', '对局答案缺失')
   const [{ data: repeated }, { data: rows }] = await Promise.all([
-    client.from('guesses').select('similarity,hint').eq('room_id', room.id).eq('normalized_word', normalized).order('created_at').limit(1).maybeSingle(),
+    client.from('guesses').select('similarity').eq('room_id', room.id).eq('normalized_word', normalized).order('created_at').limit(1).maybeSingle(),
     client.from('guesses').select('display_word,similarity').eq('room_id', room.id).order('created_at'),
   ])
   const answer = await decryptAnswer(room.answer_ciphertext)
-  let similarity = repeated?.similarity ?? 100; let hint = repeated?.hint ?? '信号完全重合！'
+  let similarity = repeated?.similarity ?? 100
   if (!repeated && normalizeWord(answer) !== normalized) {
     const history = ((rows ?? []) as Array<{ display_word: string; similarity: number }>).map((item) => ({ word: item.display_word, similarity: item.similarity }))
-    const score = await scoreGuess(answer, history, displayWord); similarity = score.similarity; hint = score.hint
+    similarity = (await scoreGuess(answer, history, displayWord)).similarity
   }
-  const { error } = await client.rpc('commit_guess', { p_code: code, p_token_hash: await tokenHash(token), p_request_id: requestId, p_expected_version: expectedVersion, p_normalized_word: normalized, p_display_word: displayWord, p_similarity: similarity, p_hint: hint })
+  const { error } = await client.rpc('commit_guess', { p_code: code, p_token_hash: await tokenHash(token), p_request_id: requestId, p_expected_version: expectedVersion, p_normalized_word: normalized, p_display_word: displayWord, p_similarity: similarity, p_hint: '' })
   if (error) throw new ApiError(409, 'GUESS_CONFLICT', '提交状态冲突')
   return snapshot(code, token)
 }

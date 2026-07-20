@@ -7,6 +7,7 @@ export type PublicPlayer = {
   nickname: string
   lastSeenAt: string
   online: boolean
+  rematchReady: boolean
 }
 
 export type PublicGuess = {
@@ -14,7 +15,6 @@ export type PublicGuess = {
   playerId: string
   displayWord: string
   similarity: number
-  hint: string
   turnNumber: number
   createdAt: string
 }

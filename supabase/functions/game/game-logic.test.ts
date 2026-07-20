@@ -17,7 +17,7 @@ describe('normalizeWord', () => {
 describe('AI 相对锚点约束', () => {
   it('计算开区间并钳制分数', () => {
     expect(calculateScoreBounds(history, ['苹果'], ['水果'])).toEqual({ min: 73, max: 83, conflict: false })
-    expect(constrainAiScore(history, { similarity: 95, hint: '接近', closerThan: ['苹果'], fartherThan: ['水果'] }).similarity).toBe(83)
+    expect(constrainAiScore(history, { similarity: 95, closerThan: ['苹果'], fartherThan: ['水果'] }).similarity).toBe(83)
   })
 
   it('识别互相冲突的锚点', () => {

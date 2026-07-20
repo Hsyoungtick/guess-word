@@ -1,5 +1,5 @@
 export type HistoryAnchor = { word: string; similarity: number }
-export type AiScore = { similarity: number; hint: string; closerThan: string[]; fartherThan: string[] }
+export type AiScore = { similarity: number; closerThan: string[]; fartherThan: string[] }
 export type ScoreBounds = { min: number; max: number; conflict: boolean }
 
 export function normalizeWord(value: string): string {
