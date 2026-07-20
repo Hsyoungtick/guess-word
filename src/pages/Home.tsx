@@ -94,7 +94,16 @@ export default function Home() {
 
   function saveCredential(value: Credential) { localStorage.setItem(STORAGE_KEY, JSON.stringify(value)); setCredential(value); history.pushState(null, '', `${location.pathname}?room=${value.roomCode}`); window.dispatchEvent(new PopStateEvent('popstate')) }
   async function run<T>(action: () => Promise<T>): Promise<T | undefined> { setBusy(true); setActionError(''); try { return await action() } catch (reason) { setActionError(reason instanceof Error ? reason.message : '操作失败') } finally { setBusy(false) } }
-  function goHome() { if (inRoom && credential && me?.isHost && (snapshot?.room.status === 'playing' || snapshot?.room.status === 'waiting')) void leaveRoom(credential).catch(() => undefined); history.pushState(null, '', location.pathname); window.dispatchEvent(new PopStateEvent('popstate')) }
+  function goHome() {
+    if (inRoom && credential && me?.isHost && (snapshot?.room.status === 'playing' || snapshot?.room.status === 'waiting')) {
+      void leaveRoom(credential).catch(() => undefined)
+      localStorage.removeItem(STORAGE_KEY)
+      setCredential(null)
+      setSnapshot(null)
+    }
+    history.pushState(null, '', location.pathname)
+    window.dispatchEvent(new PopStateEvent('popstate'))
+  }
   function returnToRoom() { if (!credential) return; history.pushState(null, '', `${location.pathname}?room=${credential.roomCode}`); window.dispatchEvent(new PopStateEvent('popstate')) }
   async function leave() { if (credential) await run(() => leaveRoom(credential)); localStorage.removeItem(STORAGE_KEY); setCredential(null); setSnapshot(null); history.pushState(null, '', location.pathname); window.dispatchEvent(new PopStateEvent('popstate')) }
   async function create(event: FormEvent) { event.preventDefault(); const result = await run(() => createRoom({ nickname: nickname.trim() || undefined, category, difficulty })); if (result) saveCredential(result as Credential) }
