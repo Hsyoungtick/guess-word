@@ -3,7 +3,7 @@ import { constrainAiScore, normalizeWord, type AiScore, type HistoryAnchor } fro
 
 type JsonObject = Record<string, unknown>
 type Seat = number
-type DbRoom = { id: string; code: string; status: 'waiting' | 'playing' | 'finished'; category: string; difficulty: string; answer_ciphertext: string | null; answer_word_id: string | null; current_player_id: string | null; turn_deadline: string | null; turn_number: number; version: number; winner_id: string | null; max_players: number; visibility: 'public' | 'private'; host_player_id: string | null; paused_at: string | null; pause_reason: string | null }
+type DbRoom = { id: string; code: string; status: 'waiting' | 'playing' | 'finished'; category: string; difficulty: string; answer_ciphertext: string | null; answer_word_id: string | null; current_player_id: string | null; turn_deadline: string | null; turn_number: number; version: number; winner_id: string | null; max_players: number; visibility: 'public' | 'private'; host_player_id: string | null; paused_at: string | null; pause_reason: string | null; ai_request_id: string | null; ai_player_id: string | null }
 type DbPlayer = { id: string; room_id: string; seat: string; seat_number: number; nickname: string; token_hash: string; last_seen_at: string; rematch_ready: boolean; is_active: boolean }
 type DbGuess = { id: string; player_id: string; display_word: string; normalized_word: string; similarity: number; turn_number: number; created_at: string }
 type AiConfig = { baseUrl: string; apiKey: string; model: string; temperature: number; timeoutMs: number }
@@ -205,7 +205,8 @@ async function authenticate(code: string, token: string): Promise<{ room: DbRoom
 
 async function snapshot(code: string, token: string) {
   const { player } = await authenticate(code, token)
-  await client.rpc('sync_room_state', { p_code: code })
+  const { error: syncError } = await client.rpc('sync_room_state', { p_code: code })
+  if (syncError) throw new ApiError(503, 'ROOM_SYNC_FAILED', '房间状态同步失败')
   const room = await roomByCode(code)
   const [{ data: playerRows }, { data: guessRows }] = await Promise.all([
     client.from('players').select('id,room_id,seat,seat_number,nickname,last_seen_at,rematch_ready,is_active').eq('room_id', room.id).order('seat_number'),
@@ -213,7 +214,7 @@ async function snapshot(code: string, token: string) {
   ])
   const now = new Date()
   const answer = room.status === 'finished' && room.answer_ciphertext ? await decryptAnswer(room.answer_ciphertext) : null
-  return { room: { code: room.code, status: room.paused_at ? 'paused' : room.status, category: room.category, difficulty: room.difficulty, version: Number(room.version), currentPlayerId: room.current_player_id, turnDeadline: room.turn_deadline, turnNumber: Number(room.turn_number), winnerId: room.winner_id, answer, hostPlayerId: room.host_player_id, maxPlayers: room.max_players, pauseReason: room.pause_reason }, players: ((playerRows ?? []) as DbPlayer[]).filter((item) => item.is_active).map((item) => ({ id: item.id, seat: Number(item.seat_number), nickname: item.nickname, isHost: item.id === room.host_player_id, isActive: item.is_active, lastSeenAt: item.last_seen_at, online: now.getTime() - new Date(item.last_seen_at).getTime() <= 45000, rematchReady: item.rematch_ready })), guesses: ((guessRows ?? []) as DbGuess[]).map((item) => ({ id: item.id, playerId: item.player_id, displayWord: item.display_word, similarity: item.similarity, turnNumber: Number(item.turn_number), createdAt: item.created_at })), me: { id: player.id, seat: Number((playerRows as DbPlayer[] | null)?.find((item) => item.id === player.id)?.seat_number || 0), isHost: player.id === room.host_player_id }, serverNow: now.toISOString() }
+  return { room: { code: room.code, status: room.paused_at ? 'paused' : room.status, category: room.category, difficulty: room.difficulty, version: Number(room.version), currentPlayerId: room.current_player_id, turnDeadline: room.turn_deadline, turnNumber: Number(room.turn_number), winnerId: room.winner_id, answer, hostPlayerId: room.host_player_id, maxPlayers: room.max_players, pauseReason: room.pause_reason, aiThinking: Boolean(room.ai_request_id) }, players: ((playerRows ?? []) as DbPlayer[]).filter((item) => item.is_active).map((item) => ({ id: item.id, seat: Number(item.seat_number), nickname: item.nickname, isHost: item.id === room.host_player_id, isActive: item.is_active, lastSeenAt: item.last_seen_at, online: now.getTime() - new Date(item.last_seen_at).getTime() <= 45000, rematchReady: item.rematch_ready })), guesses: ((guessRows ?? []) as DbGuess[]).map((item) => ({ id: item.id, playerId: item.player_id, displayWord: item.display_word, similarity: item.similarity, turnNumber: Number(item.turn_number), createdAt: item.created_at })), me: { id: player.id, seat: Number((playerRows as DbPlayer[] | null)?.find((item) => item.id === player.id)?.seat_number || 0), isHost: player.id === room.host_player_id }, serverNow: now.toISOString() }
 }
 
 async function createRoom(input: JsonObject) {
@@ -267,7 +268,8 @@ async function guess(input: JsonObject, code: string) {
   if (!Number.isSafeInteger(input.expectedVersion) || Number(input.expectedVersion) < 1) throw new ApiError(400, 'INVALID_VERSION', '缺少权威版本')
   const expectedVersion = Number(input.expectedVersion)
   const { player } = await authenticate(code, token)
-  await client.rpc('sync_room_state', { p_code: code })
+  const { error: syncError } = await client.rpc('sync_room_state', { p_code: code })
+  if (syncError) throw new ApiError(503, 'ROOM_SYNC_FAILED', '房间状态同步失败')
   const room = await roomByCode(code)
   const { data: prior } = await client.from('guesses').select('id').eq('room_id', room.id).eq('request_id', requestId).maybeSingle()
   if (prior) return snapshot(code, token)
@@ -277,19 +279,28 @@ async function guess(input: JsonObject, code: string) {
   if (Number(room.version) !== expectedVersion) throw new ApiError(409, 'VERSION_CONFLICT', '房间状态已变化')
   if (!room.turn_deadline || new Date(room.turn_deadline).getTime() <= Date.now()) throw new ApiError(409, 'TURN_EXPIRED', '本回合已超时')
   if (!room.answer_ciphertext) throw new ApiError(500, 'ANSWER_MISSING', '对局答案缺失')
-  const [{ data: repeated }, { data: rows }] = await Promise.all([
-    client.from('guesses').select('similarity').eq('room_id', room.id).eq('normalized_word', normalized).order('created_at').limit(1).maybeSingle(),
-    client.from('guesses').select('display_word,similarity').eq('room_id', room.id).order('created_at'),
-  ])
-  const answer = await decryptAnswer(room.answer_ciphertext)
-  let similarity = repeated?.similarity ?? 100
-  if (!repeated && normalizeWord(answer) !== normalized) {
-    const history = ((rows ?? []) as Array<{ display_word: string; similarity: number }>).map((item) => ({ word: item.display_word, similarity: item.similarity }))
-    similarity = (await scoreGuess(answer, history, displayWord)).similarity
+  const hash = await tokenHash(token)
+  const { data: lockedVersion, error: lockError } = await client.rpc('begin_guess', { p_code: code, p_token_hash: hash, p_request_id: requestId, p_expected_version: expectedVersion })
+  if (lockError) throw new ApiError(409, 'GUESS_CONFLICT', '回合状态已变化')
+  let committed = false
+  try {
+    const [{ data: repeated }, { data: rows }] = await Promise.all([
+      client.from('guesses').select('similarity').eq('room_id', room.id).eq('normalized_word', normalized).order('created_at').limit(1).maybeSingle(),
+      client.from('guesses').select('display_word,similarity').eq('room_id', room.id).order('created_at'),
+    ])
+    const answer = await decryptAnswer(room.answer_ciphertext)
+    let similarity = repeated?.similarity ?? 100
+    if (!repeated && normalizeWord(answer) !== normalized) {
+      const history = ((rows ?? []) as Array<{ display_word: string; similarity: number }>).map((item) => ({ word: item.display_word, similarity: item.similarity }))
+      similarity = (await scoreGuess(answer, history, displayWord)).similarity
+    }
+    const { error } = await client.rpc('commit_guess', { p_code: code, p_token_hash: hash, p_request_id: requestId, p_expected_version: Number(lockedVersion), p_normalized_word: normalized, p_display_word: displayWord, p_similarity: similarity })
+    if (error) throw new ApiError(409, 'GUESS_CONFLICT', '提交状态冲突')
+    committed = true
+    return snapshot(code, token)
+  } finally {
+    if (!committed) await client.rpc('cancel_guess', { p_code: code, p_token_hash: hash, p_request_id: requestId })
   }
-  const { error } = await client.rpc('commit_guess', { p_code: code, p_token_hash: await tokenHash(token), p_request_id: requestId, p_expected_version: expectedVersion, p_normalized_word: normalized, p_display_word: displayWord, p_similarity: similarity })
-  if (error) throw new ApiError(409, 'GUESS_CONFLICT', '提交状态冲突')
-  return snapshot(code, token)
 }
 
 async function timeout(input: JsonObject, code: string) {

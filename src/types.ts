@@ -46,6 +46,7 @@ export type GameSnapshot = {
     hostPlayerId: string | null
     maxPlayers: number
     pauseReason: string | null
+    aiThinking: boolean
   }
   players: PublicPlayer[]
   guesses: PublicGuess[]
