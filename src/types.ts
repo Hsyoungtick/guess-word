@@ -29,6 +29,7 @@ export type LobbyRoom = {
   maxPlayers: number
   playerCount: number
   updatedAt: string
+  destroyAt: string | null
 }
 
 export type GameSnapshot = {

@@ -342,7 +342,7 @@ async function resume(input: JsonObject, code: string) {
 async function lobby() {
   const { data, error } = await client.rpc('list_public_rooms')
   if (error) throw new ApiError(503, 'LOBBY_UNAVAILABLE', '房间大厅暂时不可用')
-  return (data || []).map((room: JsonObject) => ({ code: room.code, category: room.category, difficulty: room.difficulty, status: room.status, maxPlayers: room.max_players, playerCount: room.player_count, updatedAt: room.updated_at }))
+  return (data || []).map((room: JsonObject) => ({ code: room.code, category: room.category, difficulty: room.difficulty, status: room.status, maxPlayers: room.max_players, playerCount: room.player_count, updatedAt: room.updated_at, destroyAt: room.destroy_at ?? null }))
 }
 
 async function route(request: Request): Promise<unknown> {

@@ -104,6 +104,12 @@ legend { font-size: 13px; font-weight: 900; margin-bottom: 10px; }
 .waiting-players { display: grid; grid-template-columns: 1fr 50px 1fr; align-items: center; gap: 16px; }.waiting-note { opacity: .72; }.waiting-start { max-width: 380px; margin: 22px auto; }.presence { display: inline-flex; align-items: center; justify-content: center; gap: 6px; font: 700 10px 'Roboto Mono'; }.presence i { width: 8px; height: 8px; border-radius: 50%; }.presence.online i { background: #35c96b; box-shadow: 0 0 9px #35c96b; }.presence.unstable i { background: var(--yellow); }.presence.offline i,.presence.empty i { background: #7c8492; }
 .timer { display: inline-grid; place-items: center; width: 46px; height: 46px; margin-left: 10px; border: 3px solid var(--cyan); border-radius: 50%; font: 900 15px 'Roboto Mono'; }.timer.urgent { color: #b82816; border-color: var(--coral); animation: blink .7s infinite; }.network-online { color: #65db8c; }.network-unstable,.network-connecting { color: var(--yellow); }.network-offline { color: #aeb3bd; }.winner-card small { display: block; margin-top: 12px; color: var(--ink); opacity: .55; }
 
+.destroy-countdown { margin-left: auto; padding: 3px 7px; border: 1px solid rgba(184,40,22,.35); border-radius: 999px; color: #b82816; background: #ffe1d4; font: 900 10px 'Roboto Mono'; letter-spacing: .04em; }
+.history-tools { display: inline-flex; align-items: center; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
+.history-tools > span { font-size: 11px; opacity: .5; }
+.history-tools button { border: 1px solid rgba(244,234,203,.25); background: rgba(244,234,203,.06); color: var(--paper); padding: 5px 9px; border-radius: 999px; font: 700 11px 'Roboto Mono'; }
+.history-tools button.selected { background: var(--yellow); border-color: var(--yellow); color: var(--ink); }
+
 @keyframes rise { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: none; } }
 @keyframes blink { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
