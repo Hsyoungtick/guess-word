@@ -1,5 +1,5 @@
 export type HistoryAnchor = { word: string; similarity: number }
-export type AiScore = { similarity: number; closerThan: string[]; fartherThan: string[] }
+export type SemanticScore = { similarity: number; closerThan: string[]; fartherThan: string[] }
 export type ScoreBounds = { min: number; max: number; conflict: boolean }
 
 export function normalizeWord(value: string): string {
@@ -15,7 +15,25 @@ export function calculateScoreBounds(history: HistoryAnchor[], closerThan: strin
   return { min, max, conflict: min > max }
 }
 
-export function constrainAiScore(history: HistoryAnchor[], score: AiScore): AiScore & { bounds: ScoreBounds } {
+export function cosineSimilarity(left: number[], right: number[]): number {
+  if (!left.length || left.length !== right.length) throw new Error('向量维度不一致')
+  let dot = 0; let leftNorm = 0; let rightNorm = 0
+  for (let index = 0; index < left.length; index += 1) {
+    dot += left[index] * right[index]
+    leftNorm += left[index] * left[index]
+    rightNorm += right[index] * right[index]
+  }
+  if (leftNorm === 0 || rightNorm === 0) throw new Error('向量不能为空')
+  return dot / Math.sqrt(leftNorm * rightNorm)
+}
+
+export function calibrateSimilarity(value: number, floor = 0.2, ceiling = 0.8): number {
+  if (floor >= ceiling) throw new Error('校准区间无效')
+  const normalized = (value - floor) / (ceiling - floor)
+  return Math.max(0, Math.min(99, Math.round(normalized * 99)))
+}
+
+export function constrainSemanticScore(history: HistoryAnchor[], score: SemanticScore): SemanticScore & { bounds: ScoreBounds } {
   const bounds = calculateScoreBounds(history, score.closerThan, score.fartherThan)
   if (bounds.conflict) return { ...score, bounds }
   return { ...score, similarity: Math.max(bounds.min, Math.min(bounds.max, Math.round(score.similarity))), bounds }

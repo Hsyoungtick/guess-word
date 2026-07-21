@@ -1,13 +1,12 @@
 import { createClient } from 'npm:@supabase/supabase-js@2'
-import { constrainAiScore, normalizeWord, type AiScore, type HistoryAnchor } from './game-logic.ts'
+import { calibrateSimilarity, constrainSemanticScore, cosineSimilarity, normalizeWord, type HistoryAnchor, type SemanticScore } from './game-logic.ts'
 
 type JsonObject = Record<string, unknown>
 type Seat = number
 type DbRoom = { id: string; code: string; status: 'waiting' | 'playing' | 'finished'; category: string; difficulty: string; answer_ciphertext: string | null; answer_word_id: string | null; current_player_id: string | null; turn_deadline: string | null; turn_number: number; version: number; winner_id: string | null; max_players: number; visibility: 'public' | 'private'; host_player_id: string | null; paused_at: string | null; pause_reason: string | null; ai_request_id: string | null; ai_player_id: string | null }
 type DbPlayer = { id: string; room_id: string; seat: string; seat_number: number; nickname: string; token_hash: string; last_seen_at: string; rematch_ready: boolean; is_active: boolean }
 type DbGuess = { id: string; player_id: string; display_word: string; normalized_word: string; similarity: number; turn_number: number; created_at: string }
-type AiConfig = { baseUrl: string; apiKey: string; model: string; temperature: number; timeoutMs: number }
-type RankedScore = { similarity: number; ranking: string[]; closerThan: string[]; fartherThan: string[] }
+type EmbeddingConfig = { baseUrl: string; apiKey: string; model: string; timeoutMs: number; scoreFloor: number; scoreCeiling: number }
 
 class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message) }
@@ -132,28 +131,32 @@ async function decryptAnswer(payload: string): Promise<string> {
   } catch { throw new ApiError(500, 'INVALID_CIPHERTEXT', '答案密文损坏') }
 }
 
-function parseAiConfig(): AiConfig {
+function parseEmbeddingConfig(): EmbeddingConfig {
   let parsed: unknown
-  try { parsed = JSON.parse(env('AI_CONFIG')) } catch { throw new ApiError(500, 'AI_CONFIG_INVALID', 'AI 服务配置无效') }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new ApiError(500, 'AI_CONFIG_INVALID', 'AI 服务配置无效')
+  try { parsed = JSON.parse(env('EMBEDDING_CONFIG')) } catch { throw new ApiError(500, 'EMBEDDING_CONFIG_INVALID', '向量服务配置无效') }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new ApiError(500, 'EMBEDDING_CONFIG_INVALID', '向量服务配置无效')
   const value = parsed as JsonObject
-  if (typeof value.baseUrl !== 'string' || !/^https:\/\//.test(value.baseUrl) || typeof value.apiKey !== 'string' || !value.apiKey || typeof value.model !== 'string' || !value.model) throw new ApiError(500, 'AI_CONFIG_INVALID', 'AI 服务配置无效')
-  return { baseUrl: value.baseUrl.replace(/\/$/, ''), apiKey: value.apiKey, model: value.model, temperature: typeof value.temperature === 'number' ? value.temperature : 0.1, timeoutMs: typeof value.timeoutMs === 'number' ? Math.min(60000, Math.max(1000, value.timeoutMs)) : 20000 }
+  if (typeof value.baseUrl !== 'string' || !/^https:\/\//.test(value.baseUrl) || typeof value.apiKey !== 'string' || !value.apiKey || typeof value.model !== 'string' || !value.model) throw new ApiError(500, 'EMBEDDING_CONFIG_INVALID', '向量服务配置无效')
+  const scoreFloor = typeof value.scoreFloor === 'number' ? value.scoreFloor : 0.2
+  const scoreCeiling = typeof value.scoreCeiling === 'number' ? value.scoreCeiling : 0.8
+  if (scoreFloor < -1 || scoreCeiling > 1 || scoreFloor >= scoreCeiling) throw new ApiError(500, 'EMBEDDING_CONFIG_INVALID', '向量分数校准区间无效')
+  return { baseUrl: value.baseUrl.replace(/\/$/, ''), apiKey: value.apiKey, model: value.model, timeoutMs: typeof value.timeoutMs === 'number' ? Math.min(60000, Math.max(1000, value.timeoutMs)) : 10000, scoreFloor, scoreCeiling }
 }
 
-async function chat(system: string, user: JsonObject): Promise<JsonObject> {
-  const config = parseAiConfig()
+async function embed(inputs: string[]): Promise<{ vectors: number[][]; config: EmbeddingConfig }> {
+  const config = parseEmbeddingConfig()
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), config.timeoutMs)
   let response: Response
   try {
-    response = await fetch(`${config.baseUrl}/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${config.apiKey}` }, body: JSON.stringify({ model: config.model, temperature: config.temperature, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(user) }] }), signal: controller.signal })
-  } catch { throw new ApiError(502, 'AI_UNAVAILABLE', 'AI 频道暂时无法响应') } finally { clearTimeout(timeout) }
-  if (!response.ok) throw new ApiError(502, 'AI_UNAVAILABLE', 'AI 频道暂时无法响应')
-  const raw = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
-  const content = raw.choices?.[0]?.message?.content
-  if (!content) throw new ApiError(502, 'AI_INVALID_RESPONSE', 'AI 返回为空')
-  try { return JSON.parse(content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')) as JsonObject } catch { throw new ApiError(502, 'AI_INVALID_RESPONSE', 'AI 未返回合法 JSON') }
+    response = await fetch(`${config.baseUrl}/embeddings`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${config.apiKey}` }, body: JSON.stringify({ model: config.model, input: inputs, encoding_format: 'float' }), signal: controller.signal })
+  } catch { throw new ApiError(502, 'EMBEDDING_UNAVAILABLE', '向量服务暂时无法响应') } finally { clearTimeout(timeout) }
+  if (!response.ok) throw new ApiError(502, 'EMBEDDING_UNAVAILABLE', '向量服务暂时无法响应')
+  const raw = await response.json() as { data?: Array<{ index?: number; embedding?: number[] }> }
+  const vectors = [...(raw.data ?? [])].sort((a, b) => (a.index ?? 0) - (b.index ?? 0)).map((item) => item.embedding)
+  const dimension = vectors[0]?.length ?? 0
+  if (vectors.length !== inputs.length || dimension === 0 || vectors.some((vector) => !vector || vector.length !== dimension || vector.some((value) => !Number.isFinite(value)))) throw new ApiError(502, 'EMBEDDING_INVALID_RESPONSE', '向量服务返回无效')
+  return { vectors: vectors as number[][], config }
 }
 
 async function claimWord(category: string, difficulty: string): Promise<{ id: string; word: string }> {
@@ -163,29 +166,18 @@ async function claimWord(category: string, difficulty: string): Promise<{ id: st
   return { id: selected.word_id, word: selected.answer }
 }
 
-function parseScore(output: JsonObject, history: HistoryAnchor[], newGuess: string): AiScore {
-  if (typeof output.similarity !== 'number' || !Number.isFinite(output.similarity)) throw new ApiError(502, 'AI_INVALID_RESPONSE', 'AI 评分结构无效')
-  const ranking = Array.isArray(output.ranking) ? output.ranking.filter((item): item is string => typeof item === 'string') : []
-  const closerThan = Array.isArray(output.closerThan) ? output.closerThan.filter((item): item is string => typeof item === 'string') : []
-  const fartherThan = Array.isArray(output.fartherThan) ? output.fartherThan.filter((item): item is string => typeof item === 'string') : []
-  const words = new Map(history.map((item) => [normalizeWord(item.word), item.word]))
-  words.set(normalizeWord(newGuess), newGuess)
-  const validRanking = ranking.map((word) => words.get(normalizeWord(word))).filter((word): word is string => Boolean(word))
-  const newIndex = validRanking.findIndex((word) => normalizeWord(word) === normalizeWord(newGuess))
-  if (newIndex >= 0) {
-    return { similarity: output.similarity, closerThan: validRanking.slice(newIndex + 1), fartherThan: validRanking.slice(0, newIndex) }
-  }
-  return { similarity: output.similarity, closerThan, fartherThan }
-}
-
-const SCORE_RULES = '你是中文语义猜词评分器。历史分数是完整且不可修改的锚点。请把“新猜词 + 所有历史词”按与答案的语义接近程度从远到近排成一个严格 ranking 数组，数组必须包含新猜词和每个历史词各一次。然后给新猜词一个 0-99 的整数 similarity。只返回 JSON：{similarity, ranking, closerThan, fartherThan}。ranking 是最重要的字段；它必须完整、无重复、只使用输入中的原词。closerThan/fartherThan 必须与 ranking 一致：新猜词之前的词属于更远，之后的词属于更近。similarity 必须与历史分数和该排序一致。尽量使用细粒度分数区分不同词，不要偏好 0、5、10、20、50、70、80、90 等整十或整五数；除非语义确实几乎相同，不要给不同词相同分数。不得返回答案，不得改写历史分数。'
-
-async function scoreGuess(answer: string, history: HistoryAnchor[], newGuess: string): Promise<AiScore> {
-  const context = { answer, history, newGuess }
-  let score = constrainAiScore(history, parseScore(await chat(SCORE_RULES, context), history, newGuess))
-  if (!score.bounds.conflict) return score
-  score = constrainAiScore(history, parseScore(await chat(`${SCORE_RULES} 上次相对关系造成空区间；请纠正相对关系。`, { ...context, invalidResponse: score }), history, newGuess))
-  if (score.bounds.conflict) throw new ApiError(502, 'AI_ANCHOR_CONFLICT', 'AI 相对锚点冲突')
+async function scoreGuess(answer: string, history: HistoryAnchor[], newGuess: string): Promise<SemanticScore> {
+  const words = [answer, ...history.map((item) => item.word), newGuess]
+  const { vectors, config } = await embed(words)
+  const answerVector = vectors[0]
+  const ranked = words.slice(1).map((word, index) => ({ word, similarity: cosineSimilarity(answerVector, vectors[index + 1]) })).sort((left, right) => left.similarity - right.similarity)
+  const newIndex = ranked.findIndex((item) => normalizeWord(item.word) === normalizeWord(newGuess))
+  const score = constrainSemanticScore(history, {
+    similarity: calibrateSimilarity(ranked[newIndex].similarity, config.scoreFloor, config.scoreCeiling),
+    closerThan: ranked.slice(0, newIndex).map((item) => item.word),
+    fartherThan: ranked.slice(newIndex + 1).map((item) => item.word),
+  })
+  if (score.bounds.conflict) throw new ApiError(502, 'EMBEDDING_ANCHOR_CONFLICT', '向量排序与历史分数冲突')
   return score
 }
 
@@ -214,7 +206,7 @@ async function snapshot(code: string, token: string) {
   ])
   const now = new Date()
   const answer = room.status === 'finished' && room.answer_ciphertext ? await decryptAnswer(room.answer_ciphertext) : null
-  return { room: { code: room.code, status: room.paused_at ? 'paused' : room.status, category: room.category, difficulty: room.difficulty, version: Number(room.version), currentPlayerId: room.current_player_id, turnDeadline: room.turn_deadline, turnNumber: Number(room.turn_number), winnerId: room.winner_id, answer, hostPlayerId: room.host_player_id, maxPlayers: room.max_players, pauseReason: room.pause_reason, aiThinking: Boolean(room.ai_request_id) }, players: ((playerRows ?? []) as DbPlayer[]).filter((item) => item.is_active).map((item) => ({ id: item.id, seat: Number(item.seat_number), nickname: item.nickname, isHost: item.id === room.host_player_id, isActive: item.is_active, lastSeenAt: item.last_seen_at, online: now.getTime() - new Date(item.last_seen_at).getTime() <= 30000, rematchReady: item.rematch_ready })), guesses: ((guessRows ?? []) as DbGuess[]).map((item) => ({ id: item.id, playerId: item.player_id, displayWord: item.display_word, similarity: item.similarity, turnNumber: Number(item.turn_number), createdAt: item.created_at })), me: { id: player.id, seat: Number((playerRows as DbPlayer[] | null)?.find((item) => item.id === player.id)?.seat_number || 0), isHost: player.id === room.host_player_id }, serverNow: now.toISOString() }
+  return { room: { code: room.code, status: room.paused_at ? 'paused' : room.status, category: room.category, difficulty: room.difficulty, version: Number(room.version), currentPlayerId: room.current_player_id, turnDeadline: room.turn_deadline, turnNumber: Number(room.turn_number), winnerId: room.winner_id, answer, hostPlayerId: room.host_player_id, maxPlayers: room.max_players, pauseReason: room.pause_reason, semanticThinking: Boolean(room.ai_request_id) }, players: ((playerRows ?? []) as DbPlayer[]).filter((item) => item.is_active).map((item) => ({ id: item.id, seat: Number(item.seat_number), nickname: item.nickname, isHost: item.id === room.host_player_id, isActive: item.is_active, lastSeenAt: item.last_seen_at, online: now.getTime() - new Date(item.last_seen_at).getTime() <= 30000, rematchReady: item.rematch_ready })), guesses: ((guessRows ?? []) as DbGuess[]).map((item) => ({ id: item.id, playerId: item.player_id, displayWord: item.display_word, similarity: item.similarity, turnNumber: Number(item.turn_number), createdAt: item.created_at })), me: { id: player.id, seat: Number((playerRows as DbPlayer[] | null)?.find((item) => item.id === player.id)?.seat_number || 0), isHost: player.id === room.host_player_id }, serverNow: now.toISOString() }
 }
 
 async function createRoom(input: JsonObject) {
