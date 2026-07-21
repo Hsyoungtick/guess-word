@@ -48,6 +48,7 @@ export type GameSnapshot = {
     maxPlayers: number
     pauseReason: string | null
     semanticThinking: boolean
+    hint: { level: number; category: string | null; length: number | null }
   }
   players: PublicPlayer[]
   guesses: PublicGuess[]

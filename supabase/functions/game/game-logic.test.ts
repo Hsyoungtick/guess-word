@@ -11,7 +11,9 @@ describe('向量评分基础算法', () => {
   it('计算余弦相似度和校准分数', () => {
     expect(cosineSimilarity([1, 0], [1, 0])).toBe(1)
     expect(cosineSimilarity([1, 0], [0, 1])).toBe(0)
-    expect(calibrateSimilarity(0.5)).toBe(49)
+    expect(calibrateSimilarity(0.5)).toBe(2)
+    expect(calibrateSimilarity(0.55)).toBe(7)
+    expect(calibrateSimilarity(0.65)).toBe(26)
     expect(calibrateSimilarity(0.1)).toBe(0)
     expect(calibrateSimilarity(0.9)).toBe(99)
   })

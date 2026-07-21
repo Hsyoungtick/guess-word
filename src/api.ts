@@ -49,5 +49,6 @@ export const submitGuess = (credential: Credential, guess: string, expectedVersi
 export const processTimeout = (credential: Credential, expectedVersion: number) => command('timeout', credential, { expectedVersion })
 export const heartbeat = (credential: Credential) => command('heartbeat', credential)
 export const requestRematch = (credential: Credential) => command('rematch', credential)
+export const requestHint = (credential: Credential) => command('hint', credential)
 export const leaveRoom = (credential: Credential) => command<{ left: boolean }>('leave', credential)
 export const resumeRoom = (credential: Credential) => command<GameSnapshot>('resume', credential)

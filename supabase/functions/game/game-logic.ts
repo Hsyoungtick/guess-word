@@ -27,10 +27,12 @@ export function cosineSimilarity(left: number[], right: number[]): number {
   return dot / Math.sqrt(leftNorm * rightNorm)
 }
 
-export function calibrateSimilarity(value: number, floor = 0.2, ceiling = 0.8): number {
+export function calibrateSimilarity(value: number, floor = 0.45, ceiling = 0.86, gamma = 1.85): number {
   if (floor >= ceiling) throw new Error('校准区间无效')
-  const normalized = (value - floor) / (ceiling - floor)
-  return Math.max(0, Math.min(99, Math.round(normalized * 99)))
+  if (gamma <= 0) throw new Error('分数曲线无效')
+  const normalized = Math.max(0, Math.min(1, (value - floor) / (ceiling - floor)))
+  const curved = normalized ** gamma
+  return Math.max(0, Math.min(99, Math.round(curved * 99)))
 }
 
 export function constrainSemanticScore(history: HistoryAnchor[], score: SemanticScore): SemanticScore & { bounds: ScoreBounds } {

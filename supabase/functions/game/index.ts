@@ -3,10 +3,10 @@ import { calibrateSimilarity, constrainSemanticScore, cosineSimilarity, normaliz
 
 type JsonObject = Record<string, unknown>
 type Seat = number
-type DbRoom = { id: string; code: string; status: 'waiting' | 'playing' | 'finished'; category: string; difficulty: string; answer_ciphertext: string | null; answer_word_id: string | null; current_player_id: string | null; turn_deadline: string | null; turn_number: number; version: number; winner_id: string | null; max_players: number; visibility: 'public' | 'private'; host_player_id: string | null; paused_at: string | null; pause_reason: string | null; ai_request_id: string | null; ai_player_id: string | null }
+type DbRoom = { id: string; code: string; status: 'waiting' | 'playing' | 'finished'; category: string; difficulty: string; answer_ciphertext: string | null; answer_word_id: string | null; current_player_id: string | null; turn_deadline: string | null; turn_number: number; version: number; winner_id: string | null; max_players: number; visibility: 'public' | 'private'; host_player_id: string | null; paused_at: string | null; pause_reason: string | null; ai_request_id: string | null; ai_player_id: string | null; hint_level: number }
 type DbPlayer = { id: string; room_id: string; seat: string; seat_number: number; nickname: string; token_hash: string; last_seen_at: string; rematch_ready: boolean; is_active: boolean }
 type DbGuess = { id: string; player_id: string; display_word: string; normalized_word: string; similarity: number; turn_number: number; created_at: string }
-type EmbeddingConfig = { baseUrl: string; apiKey: string; model: string; timeoutMs: number; scoreFloor: number; scoreCeiling: number }
+type EmbeddingConfig = { baseUrl: string; apiKey: string; model: string; timeoutMs: number; scoreFloor: number; scoreCeiling: number; scoreGamma: number }
 
 class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message) }
@@ -147,10 +147,10 @@ function parseEmbeddingConfig(): EmbeddingConfig {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new ApiError(500, 'EMBEDDING_CONFIG_INVALID', '向量服务配置无效')
   const value = parsed as JsonObject
   if (typeof value.baseUrl !== 'string' || !/^https:\/\//.test(value.baseUrl) || typeof value.apiKey !== 'string' || !value.apiKey || typeof value.model !== 'string' || !value.model) throw new ApiError(500, 'EMBEDDING_CONFIG_INVALID', '向量服务配置无效')
-  const scoreFloor = typeof value.scoreFloor === 'number' ? value.scoreFloor : 0.2
-  const scoreCeiling = typeof value.scoreCeiling === 'number' ? value.scoreCeiling : 0.8
-  if (scoreFloor < -1 || scoreCeiling > 1 || scoreFloor >= scoreCeiling) throw new ApiError(500, 'EMBEDDING_CONFIG_INVALID', '向量分数校准区间无效')
-  return { baseUrl: value.baseUrl.replace(/\/$/, ''), apiKey: value.apiKey, model: value.model, timeoutMs: typeof value.timeoutMs === 'number' ? Math.min(60000, Math.max(1000, value.timeoutMs)) : 10000, scoreFloor, scoreCeiling }
+  const scoreFloor = 0.45
+  const scoreCeiling = 0.86
+  const scoreGamma = 1.85
+  return { baseUrl: value.baseUrl.replace(/\/$/, ''), apiKey: value.apiKey, model: value.model, timeoutMs: typeof value.timeoutMs === 'number' ? Math.min(60000, Math.max(1000, value.timeoutMs)) : 10000, scoreFloor, scoreCeiling, scoreGamma }
 }
 
 async function embed(inputs: string[], context: JsonObject = {}): Promise<{ vectors: number[][]; config: EmbeddingConfig }> {
@@ -182,11 +182,11 @@ async function embed(inputs: string[], context: JsonObject = {}): Promise<{ vect
   return { vectors: vectors as number[][], config }
 }
 
-async function claimWord(category: string, difficulty: string): Promise<{ id: string; word: string }> {
+async function claimWord(category: string, difficulty: string): Promise<{ id: string; word: string; category: string }> {
   const { data, error } = await client.rpc('claim_word', { p_category: category, p_difficulty: difficulty })
   const selected = Array.isArray(data) ? data[0] : data
   if (error || !selected?.word_id || typeof selected.answer !== 'string') throw new ApiError(503, 'WORD_BANK_EMPTY', '当前词库暂无可用词语')
-  return { id: selected.word_id, word: selected.answer }
+  return { id: selected.word_id, word: selected.answer, category: typeof selected.category === 'string' ? selected.category : category }
 }
 
 async function scoreGuess(answer: string, history: HistoryAnchor[], newGuess: string, context: JsonObject = {}): Promise<SemanticScore> {
@@ -196,7 +196,7 @@ async function scoreGuess(answer: string, history: HistoryAnchor[], newGuess: st
   const ranked = words.slice(1).map((word, index) => ({ word, similarity: cosineSimilarity(answerVector, vectors[index + 1]) })).sort((left, right) => left.similarity - right.similarity)
   const newIndex = ranked.findIndex((item) => normalizeWord(item.word) === normalizeWord(newGuess))
   const rawSimilarity = ranked[newIndex]?.similarity ?? config.scoreFloor
-  const rawScore = calibrateSimilarity(rawSimilarity, config.scoreFloor, config.scoreCeiling)
+  const rawScore = calibrateSimilarity(rawSimilarity, config.scoreFloor, config.scoreCeiling, config.scoreGamma)
   const score = constrainSemanticScore(history, {
     similarity: rawScore,
     closerThan: ranked.slice(0, newIndex).map((item) => item.word),
@@ -238,7 +238,9 @@ async function snapshot(code: string, token: string) {
   const renamedPlayers = activePlayers.filter((item) => item.nickname !== (playerRows as DbPlayer[] | null)?.find((row) => row.id === item.id)?.nickname)
   if (renamedPlayers.length) await Promise.all(renamedPlayers.map((item) => client.from('players').update({ nickname: item.nickname }).eq('id', item.id)))
   const answer = room.status === 'finished' && room.answer_ciphertext ? await decryptAnswer(room.answer_ciphertext) : null
-  return { room: { code: room.code, status: room.paused_at ? 'paused' : room.status, category: room.category, difficulty: room.difficulty, version: Number(room.version), currentPlayerId: room.current_player_id, turnDeadline: room.turn_deadline, turnNumber: Number(room.turn_number), winnerId: room.winner_id, answer, hostPlayerId: room.host_player_id, maxPlayers: room.max_players, pauseReason: room.pause_reason, semanticThinking: Boolean(room.ai_request_id) }, players: activePlayers.map((item) => ({ id: item.id, seat: Number(item.seat_number), nickname: item.nickname, isHost: item.id === room.host_player_id, isActive: item.is_active, lastSeenAt: item.last_seen_at, online: now.getTime() - new Date(item.last_seen_at).getTime() <= 30000, rematchReady: item.rematch_ready })), guesses: ((guessRows ?? []) as DbGuess[]).map((item) => ({ id: item.id, playerId: item.player_id, displayWord: item.display_word, similarity: item.similarity, turnNumber: Number(item.turn_number), createdAt: item.created_at })), me: { id: player.id, seat: Number((playerRows as DbPlayer[] | null)?.find((item) => item.id === player.id)?.seat_number || 0), isHost: player.id === room.host_player_id }, serverNow: now.toISOString() }
+  const answerMeta = room.answer_word_id && room.hint_level > 0 ? await client.from('word_bank').select('category,word').eq('id', room.answer_word_id).maybeSingle() : { data: null }
+  const hint = answerMeta.data ? { level: Math.min(2, Number(room.hint_level || 0)), category: room.hint_level >= 1 ? String(answerMeta.data.category) : null, length: room.hint_level >= 2 ? [...String(answerMeta.data.word)].length : null } : { level: 0, category: null, length: null }
+  return { room: { code: room.code, status: room.paused_at ? 'paused' : room.status, category: room.category, difficulty: room.difficulty, version: Number(room.version), currentPlayerId: room.current_player_id, turnDeadline: room.turn_deadline, turnNumber: Number(room.turn_number), winnerId: room.winner_id, answer, hostPlayerId: room.host_player_id, maxPlayers: room.max_players, pauseReason: room.pause_reason, semanticThinking: Boolean(room.ai_request_id), hint }, players: activePlayers.map((item) => ({ id: item.id, seat: Number(item.seat_number), nickname: item.nickname, isHost: item.id === room.host_player_id, isActive: item.is_active, lastSeenAt: item.last_seen_at, online: now.getTime() - new Date(item.last_seen_at).getTime() <= 30000, rematchReady: item.rematch_ready })), guesses: ((guessRows ?? []) as DbGuess[]).map((item) => ({ id: item.id, playerId: item.player_id, displayWord: item.display_word, similarity: item.similarity, turnNumber: Number(item.turn_number), createdAt: item.created_at })), me: { id: player.id, seat: Number((playerRows as DbPlayer[] | null)?.find((item) => item.id === player.id)?.seat_number || 0), isHost: player.id === room.host_player_id }, serverNow: now.toISOString() }
 }
 
 async function createRoom(input: JsonObject) {
@@ -364,6 +366,13 @@ async function rematch(input: JsonObject, code: string) {
   return snapshot(code, token)
 }
 
+async function hint(input: JsonObject, code: string) {
+  const token = text(input.playerToken, '玩家令牌', 100)
+  const { error } = await client.rpc('request_hint', { p_code: code, p_token_hash: await tokenHash(token) })
+  if (error) throw new ApiError(409, 'HINT_CONFLICT', '提示暂时不可用')
+  return snapshot(code, token)
+}
+
 async function leave(input: JsonObject, code: string) {
   const token = text(input.playerToken, '玩家令牌', 100)
   const { error } = await client.rpc('leave_room', { p_code: code, p_token_hash: await tokenHash(token) })
@@ -406,6 +415,7 @@ async function route(request: Request): Promise<unknown> {
   if (action === 'timeout') return timeout(input, code)
   if (action === 'heartbeat') return heartbeat(input, code)
   if (action === 'rematch') return rematch(input, code)
+  if (action === 'hint') return hint(input, code)
   if (action === 'leave') return leave(input, code)
   if (action === 'resume') return resume(input, code)
   throw new ApiError(404, 'NOT_FOUND', '接口不存在')
