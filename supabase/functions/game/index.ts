@@ -18,6 +18,10 @@ function env(name: string): string {
   return value
 }
 
+function debugLog(event: string, data: JsonObject = {}) {
+  console.info(JSON.stringify({ event, ...data, at: new Date().toISOString() }))
+}
+
 const client = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { auth: { persistSession: false, autoRefreshToken: false } })
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
@@ -57,9 +61,15 @@ function text(value: unknown, field: string, max: number): string {
   return result
 }
 
+function randomPlayerName(): string {
+  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+  const bytes = crypto.getRandomValues(new Uint8Array(6))
+  return `玩家${Array.from(bytes, (byte) => letters[byte % letters.length]).join('')}`
+}
+
 function playerName(value: unknown): string {
   const result = typeof value === 'string' ? value.trim() : ''
-  if (!result) return ''
+  if (!result) return randomPlayerName()
   if ([...result].length > 20 || /[\p{Cc}\p{Cf}]/u.test(result) || !/^[\p{L}\p{N} _·.'’-]+$/u.test(result)) throw new ApiError(400, 'INVALID_NICKNAME', '昵称包含不支持的字符')
   return result
 }
@@ -143,19 +153,32 @@ function parseEmbeddingConfig(): EmbeddingConfig {
   return { baseUrl: value.baseUrl.replace(/\/$/, ''), apiKey: value.apiKey, model: value.model, timeoutMs: typeof value.timeoutMs === 'number' ? Math.min(60000, Math.max(1000, value.timeoutMs)) : 10000, scoreFloor, scoreCeiling }
 }
 
-async function embed(inputs: string[]): Promise<{ vectors: number[][]; config: EmbeddingConfig }> {
+async function embed(inputs: string[], context: JsonObject = {}): Promise<{ vectors: number[][]; config: EmbeddingConfig }> {
   const config = parseEmbeddingConfig()
+  const startedAt = performance.now()
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), config.timeoutMs)
   let response: Response
+  debugLog('embedding.request', { ...context, model: config.model, inputCount: inputs.length, timeoutMs: config.timeoutMs })
   try {
     response = await fetch(`${config.baseUrl}/embeddings`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${config.apiKey}` }, body: JSON.stringify({ model: config.model, input: inputs, encoding_format: 'float' }), signal: controller.signal })
-  } catch { throw new ApiError(502, 'EMBEDDING_UNAVAILABLE', '向量服务暂时无法响应') } finally { clearTimeout(timeout) }
-  if (!response.ok) throw new ApiError(502, 'EMBEDDING_UNAVAILABLE', '向量服务暂时无法响应')
+  } catch (error) {
+    debugLog('embedding.fetch_failed', { ...context, model: config.model, durationMs: Math.round(performance.now() - startedAt), reason: error instanceof Error ? error.name : 'unknown' })
+    throw new ApiError(502, 'EMBEDDING_UNAVAILABLE', '向量服务暂时无法响应')
+  } finally { clearTimeout(timeout) }
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    debugLog('embedding.http_failed', { ...context, model: config.model, status: response.status, durationMs: Math.round(performance.now() - startedAt), body: body.slice(0, 300) })
+    throw new ApiError(502, 'EMBEDDING_UNAVAILABLE', '向量服务暂时无法响应')
+  }
+  debugLog('embedding.response', { ...context, model: config.model, status: response.status, durationMs: Math.round(performance.now() - startedAt) })
   const raw = await response.json() as { data?: Array<{ index?: number; embedding?: number[] }> }
   const vectors = [...(raw.data ?? [])].sort((a, b) => (a.index ?? 0) - (b.index ?? 0)).map((item) => item.embedding)
   const dimension = vectors[0]?.length ?? 0
-  if (vectors.length !== inputs.length || dimension === 0 || vectors.some((vector) => !vector || vector.length !== dimension || vector.some((value) => !Number.isFinite(value)))) throw new ApiError(502, 'EMBEDDING_INVALID_RESPONSE', '向量服务返回无效')
+  if (vectors.length !== inputs.length || dimension === 0 || vectors.some((vector) => !vector || vector.length !== dimension || vector.some((value) => !Number.isFinite(value)))) {
+    debugLog('embedding.invalid_response', { ...context, vectorCount: vectors.length, inputCount: inputs.length, dimension })
+    throw new ApiError(502, 'EMBEDDING_INVALID_RESPONSE', '向量服务返回无效')
+  }
   return { vectors: vectors as number[][], config }
 }
 
@@ -166,18 +189,24 @@ async function claimWord(category: string, difficulty: string): Promise<{ id: st
   return { id: selected.word_id, word: selected.answer }
 }
 
-async function scoreGuess(answer: string, history: HistoryAnchor[], newGuess: string): Promise<SemanticScore> {
+async function scoreGuess(answer: string, history: HistoryAnchor[], newGuess: string, context: JsonObject = {}): Promise<SemanticScore> {
   const words = [answer, ...history.map((item) => item.word), newGuess]
-  const { vectors, config } = await embed(words)
+  const { vectors, config } = await embed(words, context)
   const answerVector = vectors[0]
   const ranked = words.slice(1).map((word, index) => ({ word, similarity: cosineSimilarity(answerVector, vectors[index + 1]) })).sort((left, right) => left.similarity - right.similarity)
   const newIndex = ranked.findIndex((item) => normalizeWord(item.word) === normalizeWord(newGuess))
+  const rawSimilarity = ranked[newIndex]?.similarity ?? config.scoreFloor
+  const rawScore = calibrateSimilarity(rawSimilarity, config.scoreFloor, config.scoreCeiling)
   const score = constrainSemanticScore(history, {
-    similarity: calibrateSimilarity(ranked[newIndex].similarity, config.scoreFloor, config.scoreCeiling),
+    similarity: rawScore,
     closerThan: ranked.slice(0, newIndex).map((item) => item.word),
     fartherThan: ranked.slice(newIndex + 1).map((item) => item.word),
   })
-  if (score.bounds.conflict) throw new ApiError(502, 'EMBEDDING_ANCHOR_CONFLICT', '向量排序与历史分数冲突')
+  if (score.bounds.conflict) {
+    debugLog('embedding.anchor_conflict', { ...context, historyCount: history.length, rawScore, rawSimilarity: Number(rawSimilarity.toFixed(6)), min: score.bounds.min, max: score.bounds.max })
+    return { similarity: rawScore, closerThan: [], fartherThan: [] }
+  }
+  debugLog('embedding.scored', { ...context, historyCount: history.length, rawScore, finalScore: score.similarity, rawSimilarity: Number(rawSimilarity.toFixed(6)) })
   return score
 }
 
@@ -205,8 +234,11 @@ async function snapshot(code: string, token: string) {
     client.from('guesses').select('id,player_id,display_word,similarity,turn_number,created_at').eq('room_id', room.id).order('created_at'),
   ])
   const now = new Date()
+  const activePlayers = ((playerRows ?? []) as DbPlayer[]).filter((item) => item.is_active).map((item) => ({ ...item, nickname: item.nickname === 'xxx' ? randomPlayerName() : item.nickname }))
+  const renamedPlayers = activePlayers.filter((item) => item.nickname !== (playerRows as DbPlayer[] | null)?.find((row) => row.id === item.id)?.nickname)
+  if (renamedPlayers.length) await Promise.all(renamedPlayers.map((item) => client.from('players').update({ nickname: item.nickname }).eq('id', item.id)))
   const answer = room.status === 'finished' && room.answer_ciphertext ? await decryptAnswer(room.answer_ciphertext) : null
-  return { room: { code: room.code, status: room.paused_at ? 'paused' : room.status, category: room.category, difficulty: room.difficulty, version: Number(room.version), currentPlayerId: room.current_player_id, turnDeadline: room.turn_deadline, turnNumber: Number(room.turn_number), winnerId: room.winner_id, answer, hostPlayerId: room.host_player_id, maxPlayers: room.max_players, pauseReason: room.pause_reason, semanticThinking: Boolean(room.ai_request_id) }, players: ((playerRows ?? []) as DbPlayer[]).filter((item) => item.is_active).map((item) => ({ id: item.id, seat: Number(item.seat_number), nickname: item.nickname, isHost: item.id === room.host_player_id, isActive: item.is_active, lastSeenAt: item.last_seen_at, online: now.getTime() - new Date(item.last_seen_at).getTime() <= 30000, rematchReady: item.rematch_ready })), guesses: ((guessRows ?? []) as DbGuess[]).map((item) => ({ id: item.id, playerId: item.player_id, displayWord: item.display_word, similarity: item.similarity, turnNumber: Number(item.turn_number), createdAt: item.created_at })), me: { id: player.id, seat: Number((playerRows as DbPlayer[] | null)?.find((item) => item.id === player.id)?.seat_number || 0), isHost: player.id === room.host_player_id }, serverNow: now.toISOString() }
+  return { room: { code: room.code, status: room.paused_at ? 'paused' : room.status, category: room.category, difficulty: room.difficulty, version: Number(room.version), currentPlayerId: room.current_player_id, turnDeadline: room.turn_deadline, turnNumber: Number(room.turn_number), winnerId: room.winner_id, answer, hostPlayerId: room.host_player_id, maxPlayers: room.max_players, pauseReason: room.pause_reason, semanticThinking: Boolean(room.ai_request_id) }, players: activePlayers.map((item) => ({ id: item.id, seat: Number(item.seat_number), nickname: item.nickname, isHost: item.id === room.host_player_id, isActive: item.is_active, lastSeenAt: item.last_seen_at, online: now.getTime() - new Date(item.last_seen_at).getTime() <= 30000, rematchReady: item.rematch_ready })), guesses: ((guessRows ?? []) as DbGuess[]).map((item) => ({ id: item.id, playerId: item.player_id, displayWord: item.display_word, similarity: item.similarity, turnNumber: Number(item.turn_number), createdAt: item.created_at })), me: { id: player.id, seat: Number((playerRows as DbPlayer[] | null)?.find((item) => item.id === player.id)?.seat_number || 0), isHost: player.id === room.host_player_id }, serverNow: now.toISOString() }
 }
 
 async function createRoom(input: JsonObject) {
@@ -219,7 +251,7 @@ async function createRoom(input: JsonObject) {
     const code = String(random).padStart(6, '0')
     const { data: room, error } = await client.from('rooms').insert({ code, category, difficulty, max_players: 8, visibility: 'public' }).select('id').single()
     if (error) continue
-    const { data: player, error: playerError } = await client.from('players').insert({ room_id: room.id, seat: 'A', seat_number: 1, ...(nickname ? { nickname } : {}), token_hash: await tokenHash(playerToken) }).select('id').single()
+    const { data: player, error: playerError } = await client.from('players').insert({ room_id: room.id, seat: 'A', seat_number: 1, nickname, token_hash: await tokenHash(playerToken) }).select('id').single()
     if (playerError) throw new ApiError(500, 'CREATE_FAILED', '创建玩家失败')
     const { error: hostError } = await client.from('rooms').update({ host_player_id: player.id }).eq('id', room.id)
     if (hostError) throw new ApiError(500, 'CREATE_FAILED', '创建房主失败')
@@ -272,8 +304,12 @@ async function guess(input: JsonObject, code: string) {
   if (!room.turn_deadline || new Date(room.turn_deadline).getTime() <= Date.now()) throw new ApiError(409, 'TURN_EXPIRED', '本回合已超时')
   if (!room.answer_ciphertext) throw new ApiError(500, 'ANSWER_MISSING', '对局答案缺失')
   const hash = await tokenHash(token)
+  debugLog('guess.begin', { roomCode: code, requestId, playerId: player.id, wordLength: [...displayWord].length, version: expectedVersion })
   const { data: lockedVersion, error: lockError } = await client.rpc('begin_guess', { p_code: code, p_token_hash: hash, p_request_id: requestId, p_expected_version: expectedVersion })
-  if (lockError) throw new ApiError(409, 'GUESS_CONFLICT', '回合状态已变化')
+  if (lockError) {
+    debugLog('guess.lock_failed', { roomCode: code, requestId, playerId: player.id, message: lockError.message })
+    throw new ApiError(409, 'GUESS_CONFLICT', '回合状态已变化')
+  }
   let committed = false
   try {
     const [{ data: repeated }, { data: rows }] = await Promise.all([
@@ -284,14 +320,25 @@ async function guess(input: JsonObject, code: string) {
     let similarity = repeated?.similarity ?? 100
     if (!repeated && normalizeWord(answer) !== normalized) {
       const history = ((rows ?? []) as Array<{ display_word: string; similarity: number }>).map((item) => ({ word: item.display_word, similarity: item.similarity }))
-      similarity = (await scoreGuess(answer, history, displayWord)).similarity
+      similarity = (await scoreGuess(answer, history, displayWord, { roomCode: code, requestId, playerId: player.id })).similarity
     }
     const { error } = await client.rpc('commit_guess', { p_code: code, p_token_hash: hash, p_request_id: requestId, p_expected_version: Number(lockedVersion), p_normalized_word: normalized, p_display_word: displayWord, p_similarity: similarity })
-    if (error) throw new ApiError(409, 'GUESS_CONFLICT', '提交状态冲突')
+    if (error) {
+      debugLog('guess.commit_failed', { roomCode: code, requestId, playerId: player.id, similarity, message: error.message })
+      throw new ApiError(409, 'GUESS_CONFLICT', '提交状态冲突')
+    }
+    debugLog('guess.committed', { roomCode: code, requestId, playerId: player.id, similarity })
     committed = true
     return snapshot(code, token)
+  } catch (error) {
+    debugLog('guess.failed', { roomCode: code, requestId, playerId: player.id, code: error instanceof ApiError ? error.code : 'UNKNOWN', message: error instanceof Error ? error.message : '未知错误' })
+    throw error
   } finally {
-    if (!committed) await client.rpc('cancel_guess', { p_code: code, p_token_hash: hash, p_request_id: requestId })
+    if (!committed) {
+      const { error: cancelError } = await client.rpc('cancel_guess', { p_code: code, p_token_hash: hash, p_request_id: requestId })
+      if (cancelError) debugLog('guess.cancel_failed', { roomCode: code, requestId, playerId: player.id, message: cancelError.message })
+      else debugLog('guess.cancelled', { roomCode: code, requestId, playerId: player.id })
+    }
   }
 }
 
