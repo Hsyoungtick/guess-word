@@ -214,7 +214,7 @@ async function snapshot(code: string, token: string) {
   ])
   const now = new Date()
   const answer = room.status === 'finished' && room.answer_ciphertext ? await decryptAnswer(room.answer_ciphertext) : null
-  return { room: { code: room.code, status: room.paused_at ? 'paused' : room.status, category: room.category, difficulty: room.difficulty, version: Number(room.version), currentPlayerId: room.current_player_id, turnDeadline: room.turn_deadline, turnNumber: Number(room.turn_number), winnerId: room.winner_id, answer, hostPlayerId: room.host_player_id, maxPlayers: room.max_players, pauseReason: room.pause_reason, aiThinking: Boolean(room.ai_request_id) }, players: ((playerRows ?? []) as DbPlayer[]).filter((item) => item.is_active).map((item) => ({ id: item.id, seat: Number(item.seat_number), nickname: item.nickname, isHost: item.id === room.host_player_id, isActive: item.is_active, lastSeenAt: item.last_seen_at, online: now.getTime() - new Date(item.last_seen_at).getTime() <= 45000, rematchReady: item.rematch_ready })), guesses: ((guessRows ?? []) as DbGuess[]).map((item) => ({ id: item.id, playerId: item.player_id, displayWord: item.display_word, similarity: item.similarity, turnNumber: Number(item.turn_number), createdAt: item.created_at })), me: { id: player.id, seat: Number((playerRows as DbPlayer[] | null)?.find((item) => item.id === player.id)?.seat_number || 0), isHost: player.id === room.host_player_id }, serverNow: now.toISOString() }
+  return { room: { code: room.code, status: room.paused_at ? 'paused' : room.status, category: room.category, difficulty: room.difficulty, version: Number(room.version), currentPlayerId: room.current_player_id, turnDeadline: room.turn_deadline, turnNumber: Number(room.turn_number), winnerId: room.winner_id, answer, hostPlayerId: room.host_player_id, maxPlayers: room.max_players, pauseReason: room.pause_reason, aiThinking: Boolean(room.ai_request_id) }, players: ((playerRows ?? []) as DbPlayer[]).filter((item) => item.is_active).map((item) => ({ id: item.id, seat: Number(item.seat_number), nickname: item.nickname, isHost: item.id === room.host_player_id, isActive: item.is_active, lastSeenAt: item.last_seen_at, online: now.getTime() - new Date(item.last_seen_at).getTime() <= 30000, rematchReady: item.rematch_ready })), guesses: ((guessRows ?? []) as DbGuess[]).map((item) => ({ id: item.id, playerId: item.player_id, displayWord: item.display_word, similarity: item.similarity, turnNumber: Number(item.turn_number), createdAt: item.created_at })), me: { id: player.id, seat: Number((playerRows as DbPlayer[] | null)?.find((item) => item.id === player.id)?.seat_number || 0), isHost: player.id === room.host_player_id }, serverNow: now.toISOString() }
 }
 
 async function createRoom(input: JsonObject) {
@@ -332,6 +332,13 @@ async function leave(input: JsonObject, code: string) {
   return { left: true }
 }
 
+async function resume(input: JsonObject, code: string) {
+  const token = text(input.playerToken, '玩家令牌', 100)
+  const { error } = await client.rpc('resume_room', { p_code: code, p_token_hash: await tokenHash(token) })
+  if (error) throw new ApiError(409, 'RESUME_CONFLICT', '浏览器恢复记录已失效')
+  return snapshot(code, token)
+}
+
 async function lobby() {
   const { data, error } = await client.rpc('list_public_rooms')
   if (error) throw new ApiError(503, 'LOBBY_UNAVAILABLE', '房间大厅暂时不可用')
@@ -361,6 +368,7 @@ async function route(request: Request): Promise<unknown> {
   if (action === 'heartbeat') return heartbeat(input, code)
   if (action === 'rematch') return rematch(input, code)
   if (action === 'leave') return leave(input, code)
+  if (action === 'resume') return resume(input, code)
   throw new ApiError(404, 'NOT_FOUND', '接口不存在')
 }
 
