@@ -59,7 +59,7 @@ function text(value: unknown, field: string, max: number): string {
 
 function playerName(value: unknown): string {
   const result = typeof value === 'string' ? value.trim() : ''
-  if (!result) return 'xxx'
+  if (!result) return ''
   if ([...result].length > 20 || /[\p{Cc}\p{Cf}]/u.test(result) || !/^[\p{L}\p{N} _·.'’-]+$/u.test(result)) throw new ApiError(400, 'INVALID_NICKNAME', '昵称包含不支持的字符')
   return result
 }
@@ -219,7 +219,7 @@ async function createRoom(input: JsonObject) {
     const code = String(random).padStart(6, '0')
     const { data: room, error } = await client.from('rooms').insert({ code, category, difficulty, max_players: 8, visibility: 'public' }).select('id').single()
     if (error) continue
-    const { data: player, error: playerError } = await client.from('players').insert({ room_id: room.id, seat: 'A', seat_number: 1, nickname, token_hash: await tokenHash(playerToken) }).select('id').single()
+    const { data: player, error: playerError } = await client.from('players').insert({ room_id: room.id, seat: 'A', seat_number: 1, ...(nickname ? { nickname } : {}), token_hash: await tokenHash(playerToken) }).select('id').single()
     if (playerError) throw new ApiError(500, 'CREATE_FAILED', '创建玩家失败')
     const { error: hostError } = await client.from('rooms').update({ host_player_id: player.id }).eq('id', room.id)
     if (hostError) throw new ApiError(500, 'CREATE_FAILED', '创建房主失败')

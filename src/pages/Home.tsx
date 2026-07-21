@@ -20,7 +20,7 @@ function loadRoomRecord(): RoomRecord | null {
     const saved = JSON.parse(localStorage.getItem(ROOM_RECORD_KEY) || 'null') as RoomRecord | null
     if (saved?.credential) return saved
     const credential = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null') as Credential | null
-    return credential ? { credential, nickname: 'xxx' } : null
+    return credential ? { credential, nickname: '玩家' } : null
   } catch { return null }
 }
 
@@ -78,7 +78,7 @@ export default function Home() {
 
   useEffect(() => {
     if (!credential || inRoom) return
-    const record = roomRecord || { credential, nickname: 'xxx' }
+    const record = roomRecord || { credential, nickname: '玩家' }
     localStorage.setItem(ROOM_RECORD_KEY, JSON.stringify(record))
     localStorage.removeItem(STORAGE_KEY)
     setRoomRecord(record)
@@ -127,7 +127,7 @@ export default function Home() {
   }, [inRoom])
 
   function saveCredential(value: Credential, nicknameValue = nickname) {
-    const record = { credential: value, nickname: nicknameValue || 'xxx' }
+    const record = { credential: value, nickname: nicknameValue || '玩家' }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(value)); localStorage.setItem(ROOM_RECORD_KEY, JSON.stringify(record)); setCredential(value); setRoomRecord(record); history.pushState(null, '', `${location.pathname}?room=${value.roomCode}`); window.dispatchEvent(new PopStateEvent('popstate'))
   }
   async function run<T>(action: () => Promise<T>): Promise<T | undefined> { setBusy(true); setActionError(''); try { return await action() } catch (reason) { setActionError(reason instanceof Error ? reason.message : '操作失败') } finally { setBusy(false) } }
@@ -151,7 +151,7 @@ export default function Home() {
   async function exitToLobby() {
     if (credential) await leaveRoom(credential).catch(() => undefined)
     if (credential) {
-      const record = { credential, nickname: me?.nickname || 'xxx' }
+      const record = { credential, nickname: me?.nickname || '玩家' }
       localStorage.setItem(ROOM_RECORD_KEY, JSON.stringify(record)); setRoomRecord(record)
     }
     localStorage.removeItem(STORAGE_KEY); setCredential(null); setSnapshot(null)
@@ -164,7 +164,7 @@ export default function Home() {
   async function command(action: () => Promise<typeof snapshot>) { const value = await run(action); if (value) setSnapshot(value) }
   async function sendGuess(event: FormEvent) { event.preventDefault(); if (!credential || !snapshot || !guess.trim() || snapshot.room.currentPlayerId !== me?.id) return; const word = [...guess.trim()].slice(0, 8).join(''); setGuess(''); await command(() => submitGuess(credential, word, snapshot.room.version)) }
 
-  const setup = <section className="setup-stage" id="top"><div className="title-block"><p className="eyebrow">远程多人 · 向量语义猜词对战</p><h1>对上<span>词频</span><br />一猜定胜负</h1><p className="intro">创建公开房间，最多 8 位玩家轮流猜词。昵称可留空，系统会使用默认昵称 xxx。</p></div><div className="control-console"><div className="console-header"><span>在线调频台</span><span className="console-code">NET-08</span></div><label className="name-field coral lobby-name"><span>你的昵称（可选）</span><input maxLength={20} value={nickname} onChange={(e) => setNickname(e.target.value)} placeholder="默认昵称 xxx" /></label><form onSubmit={create}><fieldset><legend>创建房间 · 选择词库频道</legend><div className="choice-row">{categories.map((item) => <button type="button" className={category === item ? 'selected' : ''} onClick={() => setCategory(item)} key={item}>{item}</button>)}</div></fieldset><fieldset><legend>信号干扰强度</legend><div className="difficulty-row">{difficulties.map((item, index) => <button type="button" className={difficulty === item ? 'selected' : ''} onClick={() => setDifficulty(item)} key={item}><span>{item}</span><i>{'●'.repeat(index + 1)}</i></button>)}</div></fieldset><button disabled={busy} className="start-button" type="submit"><span>创建公开房间</span><ArrowRight size={23} /></button></form><div className="join-divider"><span>或使用六位数字房码</span></div><form className="join-form" onSubmit={join}><input aria-label="六位数字房间码或邀请链接" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={roomCode} onChange={(e) => setRoomCode(parseRoomCode(e.target.value))} onPaste={(e) => { const code = parseRoomCode(e.clipboardData.getData('text')); if (code) { e.preventDefault(); setRoomCode(code) } }} placeholder="000000" /><button type="submit" disabled={busy}>{busy ? '加入中…' : '加入'}</button></form>{(actionError || syncError) && <p className="error-message">{actionError || syncError}</p>}<p className="privacy-note">目标答案与向量服务密钥只留在服务端</p></div><div className="dial-art" aria-hidden="true"><span>0</span><span>50</span><span>100</span><div className="needle" /></div></section>
+  const setup = <section className="setup-stage" id="top"><div className="title-block"><p className="eyebrow">远程多人 · 向量语义猜词对战</p><h1>对上<span>词频</span><br />一猜定胜负</h1><p className="intro">创建公开房间，最多 8 位玩家轮流猜词。昵称可留空，系统会随机生成“玩家ABCDEF”格式昵称。</p></div><div className="control-console"><div className="console-header"><span>在线调频台</span><span className="console-code">NET-08</span></div><label className="name-field coral lobby-name"><span>你的昵称（可选）</span><input maxLength={20} value={nickname} onChange={(e) => setNickname(e.target.value)} placeholder="默认随机生成 玩家ABCDEF" /></label><form onSubmit={create}><fieldset><legend>创建房间 · 选择词库频道</legend><div className="choice-row">{categories.map((item) => <button type="button" className={category === item ? 'selected' : ''} onClick={() => setCategory(item)} key={item}>{item}</button>)}</div></fieldset><fieldset><legend>信号干扰强度</legend><div className="difficulty-row">{difficulties.map((item, index) => <button type="button" className={difficulty === item ? 'selected' : ''} onClick={() => setDifficulty(item)} key={item}><span>{item}</span><i>{'●'.repeat(index + 1)}</i></button>)}</div></fieldset><button disabled={busy} className="start-button" type="submit"><span>创建公开房间</span><ArrowRight size={23} /></button></form><div className="join-divider"><span>或使用六位数字房码</span></div><form className="join-form" onSubmit={join}><input aria-label="六位数字房间码或邀请链接" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={roomCode} onChange={(e) => setRoomCode(parseRoomCode(e.target.value))} onPaste={(e) => { const code = parseRoomCode(e.clipboardData.getData('text')); if (code) { e.preventDefault(); setRoomCode(code) } }} placeholder="000000" /><button type="submit" disabled={busy}>{busy ? '加入中…' : '加入'}</button></form>{(actionError || syncError) && <p className="error-message">{actionError || syncError}</p>}<p className="privacy-note">目标答案与向量服务密钥只留在服务端</p></div><div className="dial-art" aria-hidden="true"><span>0</span><span>50</span><span>100</span><div className="needle" /></div></section>
 
   if (!inRoom) return <main className="app-shell"><div className="noise" aria-hidden="true" /><header className="topbar"><button className="brand" onClick={goHome}><span className="brand-mark"><Radio size={22} /></span><span>词频对决</span></button><div className="broadcast"><i /> ONLINE LOBBY</div></header>{roomRecord && !inRoom && <section className="resume-banner"><span>浏览器记录：房间 {roomRecord.credential.roomCode}</span><button onClick={() => void returnToRoom()}>返回房间 <ArrowRight size={16} /></button></section>}{setup}<section className="lobby-section"><div className="history-heading"><div><span>PUBLIC CHANNELS</span><h2>在线房间大厅</h2></div><span>{lobbyRooms.length} 个房间</span></div>{lobbyError && <p className="error-message">{lobbyError}</p>}{lobbyRooms.length ? <div className="lobby-grid">{lobbyRooms.map((room) => <LobbyCard key={room.code} room={room} onJoin={joinLobby} now={lobbyNow} />)}</div> : <div className="empty-history">当前没有可加入的公开房间。</div>}</section></main>
 
